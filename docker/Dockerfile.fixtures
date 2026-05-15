@@ -1,0 +1,67 @@
+# =============================================================================
+# gofr-agent Test MCP Fixture Services Image
+# =============================================================================
+# Builds a slim Python image that runs the four in-process test MCP services
+# (instruments, clients, trades, analytics) as real HTTP servers.
+#
+# The image is used by docker/compose.fixtures.yml (Swarm stack).
+# It only installs gofr-common + the minimal runtime deps needed by the
+# fixture modules — no heavy dev tooling.
+#
+# Build:
+#   docker/build-fixtures.sh
+#   # or manually:
+#   docker build -f docker/Dockerfile.fixtures -t gofr-agent-fixtures:latest .
+# =============================================================================
+
+FROM python:3.11-slim
+
+# ── System packages ──────────────────────────────────────────────────────────
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Install uv ───────────────────────────────────────────────────────────────
+RUN pip install --no-cache-dir uv
+
+# ── Project root ─────────────────────────────────────────────────────────────
+WORKDIR /app
+
+# ── gofr-common (editable install from submodule) ────────────────────────────
+COPY lib/gofr-common/pyproject.toml  lib/gofr-common/pyproject.toml
+COPY lib/gofr-common/readme.md       lib/gofr-common/readme.md
+COPY lib/gofr-common/src/            lib/gofr-common/src/
+
+# ── Fixture code + data ───────────────────────────────────────────────────────
+# Only the packages that serve.py actually imports at runtime:
+#   tests.fixtures.mcp_services.{instruments,clients,trades,analytics}
+COPY tests/__init__.py                         tests/__init__.py
+COPY tests/fixtures/__init__.py                tests/fixtures/__init__.py
+COPY tests/fixtures/mcp_services/              tests/fixtures/mcp_services/
+
+# ── Launcher ──────────────────────────────────────────────────────────────────
+COPY docker/mcp_fixtures/serve.py  docker/mcp_fixtures/serve.py
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+# gofr-common pins mcp==1.23.1 which conflicts with mcp>=1.26.0 needed by the
+# fixture services.  Install gofr-common source only (--no-deps) so its pin
+# is not propagated, then explicitly install the runtime packages at the
+# versions used in the dev venv.
+ENV VIRTUAL_ENV=/app/.venv
+RUN uv venv $VIRTUAL_ENV \
+    && uv pip install --no-cache-dir --no-deps --editable lib/gofr-common \
+    && uv pip install --no-cache-dir "mcp==1.27.1" "uvicorn==0.46.0"
+
+# ── Runtime environment ───────────────────────────────────────────────────────
+ENV VIRTUAL_ENV=/app/.venv
+ENV PYTHONPATH=/app
+ENV PATH="/app/.venv/bin:$PATH"
+
+# ── Health probe helper (used by compose.fixtures.yml healthchecks) ───────────
+# Simple TCP-connect; replace with an HTTP probe if FastMCP gains /health.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+    CMD python -c \
+        "import os,socket; s=socket.socket(); s.settimeout(2); \
+         s.connect(('127.0.0.1', int(os.environ['SERVICE_PORT']))); s.close()"
+
+ENTRYPOINT ["python", "docker/mcp_fixtures/serve.py"]

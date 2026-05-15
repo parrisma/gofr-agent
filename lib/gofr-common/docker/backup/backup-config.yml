@@ -1,0 +1,88 @@
+# GOFR Backup Configuration
+# Used by the backup-scheduler service
+
+backup:
+  # Global settings
+  schedule: "${BACKUP_SCHEDULE:-0 2 * * *}"  # Default: 2 AM daily
+  retention_days: ${BACKUP_RETENTION_DAYS:-7}
+  compression: gzip
+  
+  # Backup destinations
+  destinations:
+    local:
+      path: /backups
+      enabled: true
+    
+  # Volume groups to backup
+  volumes:
+    infrastructure:
+      - name: neo4j-data
+        source: /source/neo4j-data
+        priority: high
+        pre_backup_hook: null  # Could call neo4j backup command
+        
+      - name: chroma-data
+        source: /source/chroma-data
+        priority: high
+        
+    services:
+      - name: plot-data
+        source: /source/plot-data
+        priority: medium
+        
+      - name: plot-logs
+        source: /source/plot-logs
+        priority: low
+        retention_days: 3  # Override: keep logs for less time
+        
+      - name: doc-data
+        source: /source/doc-data
+        priority: medium
+        
+      - name: doc-logs
+        source: /source/doc-logs
+        priority: low
+        retention_days: 3
+        
+      - name: dig-data
+        source: /source/dig-data
+        priority: medium
+        
+      - name: dig-logs
+        source: /source/dig-logs
+        priority: low
+        retention_days: 3
+        
+      - name: iq-data
+        source: /source/iq-data
+        priority: medium
+        
+      - name: iq-logs
+        source: /source/iq-logs
+        priority: low
+        retention_days: 3
+        
+      - name: np-data
+        source: /source/np-data
+        priority: medium
+        
+      - name: np-logs
+        source: /source/np-logs
+        priority: low
+        retention_days: 3
+        
+    tools:
+      - name: n8n-data
+        source: /source/n8n-data
+        priority: high
+        
+      - name: openwebui-data
+        source: /source/openwebui-data
+        priority: medium
+
+# Notification settings (future)
+notifications:
+  enabled: false
+  on_success: false
+  on_failure: true
+  channels: []

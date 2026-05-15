@@ -1,0 +1,72 @@
+[project]
+name = "gofr-agent"
+version = "0.1.0"
+description = "Reasoning agent over MCP services — MCP Streamable HTTP server"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+# Note: gofr-common is installed as editable from lib/gofr-common submodule by entrypoint
+# Core deps (mcp, pydantic, fastapi, uvicorn, starlette, sse-starlette, PyJWT, httpx) come from gofr-common
+dependencies = [
+    "mcp>=1.26.0",
+    "pydantic-ai>=0.0.54",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "typer>=0.20.0",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.14",
+    "ruff>=0.1.0",
+    "pyright>=1.1.0",
+    "bandit>=1.7.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+addopts = "--strict-markers"
+markers = [
+    "openrouter: tests that make real calls to OpenRouter (require OPENROUTER_API_KEY)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["B008"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
+reportAttributeAccessIssue = "warning"
+reportPossiblyUnboundVariable = "warning"
+venvPath = "."
+venv = ".venv"
+
+[tool.coverage.run]
+source = ["app"]
+omit = [
+    "*/__pycache__/*",
+    "*/tests/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_empty = true

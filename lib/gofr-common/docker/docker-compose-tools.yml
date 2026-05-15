@@ -1,0 +1,121 @@
+# GOFR Tools Docker Compose - OpenWebUI & n8n Production Stack
+#
+# Port Configuration:
+#   All ports defined in lib/gofr-common/config/gofr_ports.env
+#   Must be exported to environment before running docker compose
+# 
+# OpenWebUI Integration:
+#   OpenWebUI can connect to MCPO at http://gofr-mcpo:${GOFR_IQ_MCPO_PORT}
+#   Manual configuration required through WebUI after startup
+#
+# n8n Integration:
+#   n8n can connect to gofr services via Docker network
+#   Manual workflow configuration required through n8n UI
+#
+# Usage:
+#   Use start-tools-prod.sh to start tools stack (recommended)
+#   OR manually:
+#     cd lib/gofr-common/docker
+#     set -a && source ../../config/gofr_ports.env && set +a
+#     docker compose up -d
+#
+# Services:
+#   - openwebui: LLM Chat Interface - port ${GOFR_OPENWEBUI_PORT}
+#   - n8n:       Workflow Automation - port ${GOFR_N8N_PORT}
+
+name: gofr
+
+services:
+  # ==========================================================================
+  # OpenWebUI - LLM Chat Interface
+  # ==========================================================================
+  openwebui:
+    image: gofr-openwebui:prod
+    container_name: gofr-openwebui
+    hostname: gofr-openwebui
+    restart: unless-stopped
+    ports:
+      - "${GOFR_OPENWEBUI_PORT:-8083}:8080"
+    volumes:
+      - gofr-openwebui-data:/app/backend/data
+    environment:
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+      - WEBUI_URL=http://localhost:${GOFR_OPENWEBUI_PORT:-8083}
+      - ENABLE_SIGNUP=true
+      - OPENAI_API_KEY=${OPENROUTER_API_KEY:-}
+      - ENABLE_OLLAMA_API=false
+      - ENABLE_OPENAI_API=true
+      - OPENAI_API_BASE_URL=https://openrouter.ai/api/v1
+      - OPENAI_API_KEY=${OPENROUTER_API_KEY:-}
+    networks:
+      - gofr-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ==========================================================================
+  # n8n - Workflow Automation
+  # ==========================================================================
+  n8n:
+    image: gofr-n8n:prod
+    container_name: gofr-n8n
+    hostname: gofr-n8n
+    restart: unless-stopped
+    ports:
+      - "${GOFR_N8N_PORT:-8084}:5678"
+    volumes:
+      - gofr-n8n-data:/home/node/.n8n
+      - gofr-n8n-logs:/var/log/n8n
+      - /tmp:/home/node/user_data
+    environment:
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_SECURE_COOKIE=false
+      - WEBHOOK_URL=http://localhost:${GOFR_N8N_PORT:-8084}/
+      - GENERIC_TIMEZONE=UTC
+      - N8N_LOG_LEVEL=info
+      - N8N_LOG_OUTPUT=console,file
+      - N8N_LOG_FILE_LOCATION=/var/log/n8n
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-}
+      - N8N_RESTRICT_FILE_ACCESS_TO=/home/node/.n8n-files;/home/node/user_data
+      - EXECUTIONS_DATA_SAVE_ON_ERROR=all
+      - EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
+      - EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS=true
+    networks:
+      - gofr-net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+# ==========================================================================
+# Networks
+# ==========================================================================
+networks:
+  gofr-net:
+    name: gofr-net
+    external: true
+
+# ==========================================================================
+# Volumes
+# ==========================================================================
+volumes:
+  gofr-openwebui-data:
+    name: gofr-openwebui-data
+    external: false
+  gofr-n8n-data:
+    name: gofr-n8n-data
+    external: false
+  gofr-n8n-logs:
+    name: gofr-n8n-logs
+    external: false

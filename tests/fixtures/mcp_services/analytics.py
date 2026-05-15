@@ -1,0 +1,216 @@
+"""Analytics test MCP service.
+
+Provides 7 stateless tools for computing derived market metrics.
+All tools call _require_bearer() first; any non-empty bearer token is accepted.
+No CSV data — the agent supplies market data in each call.
+"""
+
+from __future__ import annotations
+
+import math
+
+from mcp.server.fastmcp import FastMCP
+
+from tests.fixtures.mcp_services._server import _require_bearer
+
+# ---------------------------------------------------------------------------
+# FastMCP instance
+# ---------------------------------------------------------------------------
+
+mcp = FastMCP("analytics-test-service")
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def historical_volatility(ticker: str, bars: list[dict], window: int = 20) -> dict:
+    """Compute annualised close-to-close historical volatility (std of log returns * sqrt(252)).
+
+    Returns annualised_vol=None and observations=0 when fewer than window+1 bars are supplied.
+    """
+    _require_bearer()
+    closes = [float(b["close"]) for b in bars]
+    if len(closes) < window + 1:
+        return {
+            "ticker": ticker,
+            "window": window,
+            "annualised_vol": None,
+            "as_of": bars[-1]["date"] if bars else None,
+            "observations": 0,
+        }
+    log_rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+    used = log_rets[-window:]
+    mean = sum(used) / len(used)
+    variance = sum((r - mean) ** 2 for r in used) / (len(used) - 1)
+    annualised_vol = math.sqrt(variance) * math.sqrt(252)
+    return {
+        "ticker": ticker,
+        "window": window,
+        "annualised_vol": round(annualised_vol, 6),
+        "as_of": bars[-1]["date"],
+        "observations": len(used),
+    }
+
+
+@mcp.tool()
+def vwap(ticker: str, bars: list[dict]) -> dict:
+    """Compute the volume-weighted average price over the supplied bars.
+
+    Uses (open + high + low + close) / 4 as the typical price per bar.
+    """
+    _require_bearer()
+    total_vol = sum(int(b["volume"]) for b in bars)
+    total_pv = sum(
+        ((float(b["open"]) + float(b["high"]) + float(b["low"]) + float(b["close"])) / 4)
+        * int(b["volume"])
+        for b in bars
+    )
+    vwap_price = total_pv / total_vol if total_vol > 0 else 0.0
+    return {
+        "ticker": ticker,
+        "vwap": round(vwap_price, 6),
+        "from_date": bars[0]["date"],
+        "to_date": bars[-1]["date"],
+        "total_volume": total_vol,
+    }
+
+
+@mcp.tool()
+def simple_return(ticker: str, bars: list[dict]) -> dict:
+    """Compute the total simple price return between the first and last bar close.
+
+    return_pct = (to_price / from_price - 1) * 100
+    """
+    _require_bearer()
+    from_price = float(bars[0]["close"])
+    to_price = float(bars[-1]["close"])
+    return_pct = (to_price / from_price - 1) * 100
+    return {
+        "ticker": ticker,
+        "from_date": bars[0]["date"],
+        "to_date": bars[-1]["date"],
+        "from_price": from_price,
+        "to_price": to_price,
+        "return_pct": round(return_pct, 6),
+    }
+
+
+@mcp.tool()
+def max_drawdown(ticker: str, bars: list[dict]) -> dict:
+    """Compute maximum peak-to-trough drawdown over the supplied bars.
+
+    Drawdown is expressed as a percentage (negative = loss).
+    """
+    _require_bearer()
+    peak_close = float("-inf")
+    peak_date = bars[0]["date"]
+    max_dd_pct = 0.0
+    dd_peak_close = float(bars[0]["close"])
+    dd_peak_date = bars[0]["date"]
+    dd_trough_close = float(bars[0]["close"])
+    dd_trough_date = bars[0]["date"]
+
+    for bar in bars:
+        close = float(bar["close"])
+        if close > peak_close:
+            peak_close = close
+            peak_date = bar["date"]
+        dd = (close - peak_close) / peak_close * 100
+        if dd < max_dd_pct:
+            max_dd_pct = dd
+            dd_peak_close = peak_close
+            dd_peak_date = peak_date
+            dd_trough_close = close
+            dd_trough_date = bar["date"]
+
+    return {
+        "ticker": ticker,
+        "max_drawdown_pct": round(max_dd_pct, 6),
+        "peak_date": dd_peak_date,
+        "trough_date": dd_trough_date,
+        "peak_close": dd_peak_close,
+        "trough_close": dd_trough_close,
+    }
+
+
+@mcp.tool()
+def price_momentum(ticker: str, bars: list[dict], window: int = 20) -> dict:
+    """Return a simple momentum signal: last close vs N-day moving average.
+
+    signal is "above_ma", "below_ma", or "insufficient_data".
+    """
+    _require_bearer()
+    closes = [float(b["close"]) for b in bars]
+    if len(closes) < window:
+        return {
+            "ticker": ticker,
+            "window": window,
+            "last_close": closes[-1] if closes else None,
+            "moving_avg": None,
+            "signal": "insufficient_data",
+            "as_of": bars[-1]["date"] if bars else None,
+        }
+    last_close = closes[-1]
+    ma_window = closes[-window:]
+    moving_avg = sum(ma_window) / len(ma_window)
+    signal = "above_ma" if last_close > moving_avg else "below_ma"
+    return {
+        "ticker": ticker,
+        "window": window,
+        "last_close": last_close,
+        "moving_avg": round(moving_avg, 6),
+        "signal": signal,
+        "as_of": bars[-1]["date"],
+    }
+
+
+@mcp.tool()
+def position_market_value(
+    client_id: str,
+    ticker: str,
+    quantity: int,
+    spot_price: float,
+    currency: str,
+) -> dict:
+    """Compute market value for one holding using a quantity and spot price supplied by the agent.
+
+    The agent must fetch the holding from Client Service and spot price from Instrument Service.
+    """
+    _require_bearer()
+    return {
+        "client_id": client_id,
+        "ticker": ticker,
+        "quantity": quantity,
+        "spot_price": spot_price,
+        "currency": currency,
+        "market_value": round(quantity * spot_price, 4),
+    }
+
+
+@mcp.tool()
+def compare_execution_to_vwap(
+    ticker: str,
+    side: str,
+    execution_price: float,
+    vwap_price: float,
+) -> dict:
+    """Compare an execution price against a VWAP in basis points.
+
+    Favourable means: buy execution below VWAP or sell execution above VWAP.
+    basis_points = (execution_price - vwap_price) / vwap_price * 10000
+    """
+    _require_bearer()
+    basis_points = (execution_price - vwap_price) / vwap_price * 10000
+    favourable = (side.lower() == "buy" and execution_price < vwap_price) or (
+        side.lower() == "sell" and execution_price > vwap_price
+    )
+    return {
+        "ticker": ticker,
+        "side": side.lower(),
+        "execution_price": execution_price,
+        "vwap": vwap_price,
+        "basis_points": round(basis_points, 4),
+        "favourable": favourable,
+    }

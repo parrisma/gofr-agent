@@ -1,0 +1,66 @@
+# GOFR-AGENT Development Image
+# Extends gofr-base:latest with project-specific dev tools
+FROM gofr-base:latest
+
+# Switch to root for package installation
+USER root
+
+# Install additional dev tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gh \
+    openssh-server \
+    dnsutils \
+    net-tools \
+    netcat-openbsd \
+    telnet \
+    lsof \
+    htop \
+    strace \
+    tcpdump \
+    vim \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Docker CLI for Docker-in-Docker (DinD) capability
+# This allows running docker commands from within the container
+# by mounting the host's Docker socket
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add gofr user to docker group (group will be created/mapped at runtime)
+# The docker group GID will be set to match the host's docker socket GID
+RUN groupadd -g 999 docker || true \
+    && usermod -aG docker gofr
+
+# Create project directories
+RUN mkdir -p /home/gofr/devroot/gofr-agent/data \
+    && mkdir -p /home/gofr/devroot/gofr-common \
+    && chown -R gofr:gofr /home/gofr/devroot
+
+# Copy entrypoint
+COPY docker/entrypoint-dev.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+WORKDIR /home/gofr/devroot/gofr-agent
+
+# SSH config for git operations
+RUN mkdir -p /home/gofr/.ssh && chmod 700 /home/gofr/.ssh
+
+# Create venv (will be populated by entrypoint)
+RUN uv venv /home/gofr/devroot/gofr-agent/.venv --python=python3.11
+
+# Standard GOFR ports (gofr-doc uses 8040-8042)
+EXPOSE 8040 8041 8042
+
+USER gofr
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["tail", "-f", "/dev/null"]

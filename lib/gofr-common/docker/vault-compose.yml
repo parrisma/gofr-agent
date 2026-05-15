@@ -1,0 +1,49 @@
+# GOFR Shared Vault - Standalone Compose
+# Uses custom image with baked-in config (no bind mount issues)
+# Build first: cd /home/gofr/devroot/gofr-iq/lib/gofr-common && docker build -f docker/Dockerfile.vault -t gofr-vault:latest .
+
+name: gofr
+
+services:
+  vault:
+    image: gofr-vault:latest
+    container_name: gofr-vault
+    hostname: gofr-vault
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - "${GOFR_VAULT_PORT:-8201}:8201"
+    environment:
+      - VAULT_ADDR=http://0.0.0.0:8201
+      - VAULT_API_ADDR=http://0.0.0.0:8201
+      - VAULT_LOG_LEVEL=info
+      - SKIP_SETCAP=true
+    volumes:
+      - gofr-vault-data:/vault/data
+      - gofr-vault-logs:/vault/logs
+      - gofr-vault-file:/vault/file
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - gofr-net
+
+networks:
+  gofr-net:
+    external: true
+    name: gofr-net
+
+volumes:
+  gofr-vault-data:
+    name: gofr-vault-data
+    external: true  # Reuse existing volume with migrated data
+  gofr-vault-logs:
+    name: gofr-vault-logs
+    external: true  # Reuse existing volume from main stack
+  gofr-vault-file:
+    name: gofr-vault-file
+    external: true  # Reuse existing volume from main stack

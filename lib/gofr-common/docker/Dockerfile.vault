@@ -1,0 +1,29 @@
+# HashiCorp Vault server for GOFR shared infrastructure
+# Provides authentication backend and secret storage
+#
+# Build from gofr-common: docker build -f docker/Dockerfile.vault -t gofr-vault:latest .
+
+FROM hashicorp/vault:1.15.4
+
+# OCI Labels
+ARG BUILD_DATE
+ARG GIT_COMMIT
+LABEL org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.version="1.15.4" \
+      org.opencontainers.image.title="gofr-vault" \
+      org.opencontainers.image.description="HashiCorp Vault for GOFR infrastructure"
+
+# Copy configuration and entrypoint into image (no bind mount issues)
+COPY docker/vault-config.hcl /vault/config/vault.hcl
+COPY --chmod=755 docker/entrypoint-vault.sh /entrypoint-vault.sh
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
+    CMD vault status || exit 1
+
+EXPOSE 8201 8202
+
+# Use custom entrypoint
+ENTRYPOINT ["/entrypoint-vault.sh"]
+CMD ["server", "-config=/vault/config/vault.hcl"]

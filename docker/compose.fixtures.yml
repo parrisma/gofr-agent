@@ -1,0 +1,142 @@
+# =============================================================================
+# gofr-agent Test MCP Fixture Services — Docker Swarm Stack
+# =============================================================================
+# Four standalone MCP services (instruments, clients, trades, analytics)
+# that the gofr-agent can connect to for integration/e2e testing.
+#
+# Each service accepts any non-empty Bearer token.
+# Set FIXTURE_TOKEN to whatever value you want clients to use.
+#
+# Deploy:
+#   docker stack deploy -c docker/compose.fixtures.yml gofr-fixtures
+#
+# Remove:
+#   docker stack rm gofr-fixtures
+#
+# Logs:
+#   docker service logs gofr-fixtures_instruments -f
+#
+# Port map (published on all swarm nodes):
+#   instruments  → host:8500  (internal 8500)
+#   clients      → host:8501  (internal 8501)
+#   trades       → host:8502  (internal 8502)
+#   analytics    → host:8503  (internal 8503)
+# =============================================================================
+
+version: "3.9"
+
+# ── Shared anchor ─────────────────────────────────────────────────────────────
+
+x-svc-defaults: &svc-defaults
+  image: gofr-agent-fixtures:latest
+  networks:
+    - fixtures-net
+  deploy:
+    replicas: 1
+    restart_policy:
+      condition: on-failure
+      delay: 5s
+      max_attempts: 3
+    update_config:
+      parallelism: 1
+      delay: 10s
+      order: start-first
+
+# ── Services ──────────────────────────────────────────────────────────────────
+
+services:
+
+  instruments:
+    <<: *svc-defaults
+    command: ["--service", "instruments", "--port", "8500"]
+    environment:
+      SERVICE_PORT: "8500"
+    ports:
+      - target: 8500
+        published: "${FIXTURE_INSTRUMENTS_PORT:-8500}"
+        protocol: tcp
+        mode: host
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; s=socket.socket(); s.settimeout(2);
+           s.connect(('127.0.0.1', 8500)); s.close()"
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+
+  clients:
+    <<: *svc-defaults
+    command: ["--service", "clients", "--port", "8501"]
+    environment:
+      SERVICE_PORT: "8501"
+    ports:
+      - target: 8501
+        published: "${FIXTURE_CLIENTS_PORT:-8501}"
+        protocol: tcp
+        mode: host
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; s=socket.socket(); s.settimeout(2);
+           s.connect(('127.0.0.1', 8501)); s.close()"
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+
+  trades:
+    <<: *svc-defaults
+    command: ["--service", "trades", "--port", "8502"]
+    environment:
+      SERVICE_PORT: "8502"
+    ports:
+      - target: 8502
+        published: "${FIXTURE_TRADES_PORT:-8502}"
+        protocol: tcp
+        mode: host
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; s=socket.socket(); s.settimeout(2);
+           s.connect(('127.0.0.1', 8502)); s.close()"
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+
+  analytics:
+    <<: *svc-defaults
+    command: ["--service", "analytics", "--port", "8503"]
+    environment:
+      SERVICE_PORT: "8503"
+    ports:
+      - target: 8503
+        published: "${FIXTURE_ANALYTICS_PORT:-8503}"
+        protocol: tcp
+        mode: host
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; s=socket.socket(); s.settimeout(2);
+           s.connect(('127.0.0.1', 8503)); s.close()"
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+
+# ── Network ────────────────────────────────────────────────────────────────────
+
+networks:
+  fixtures-net:
+    driver: overlay
+    attachable: true

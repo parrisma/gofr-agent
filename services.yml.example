@@ -1,0 +1,45 @@
+# gofr-agent services manifest
+# ─────────────────────────────────────────────────────────────────────────────
+# Each entry under `services:` declares one downstream MCP service.
+# At startup gofr-agent will connect to every enabled service, discover its
+# tools and surface them through its own reasoning agent.
+#
+# Fields
+# ──────
+# name        (required) — identifier used in tool names, e.g. "rag" → tools
+#               become "rag__search", "rag__ingest", …
+# url         (required) — Streamable-HTTP MCP endpoint
+# token       (optional) — bearer token sent in Authorization header
+# token_env   (optional) — name of env-var that holds the bearer token
+#                          (takes precedence over `token`)
+# description (optional) — shown in the agent's system prompt
+# enabled     (optional, default: true) — set to false to skip the service
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Example 1: local RAG service ──────────────────────────────────────────
+  - name: rag
+    url: http://localhost:8100/mcp
+    description: >
+      Retrieval-augmented generation service. Use this to search the internal
+      knowledge base before answering questions about company policy, products
+      or documentation.
+    # token_env: RAG_MCP_TOKEN     # uncomment to read token from env var
+    enabled: true
+
+  # ── Example 2: code-execution sandbox ─────────────────────────────────────
+  - name: sandbox
+    url: http://localhost:8200/mcp
+    description: >
+      Secure Python sandbox. Use this to run calculations, data transformations
+      or to verify code snippets.
+    token_env: SANDBOX_MCP_TOKEN
+    enabled: true
+
+  # ── Example 3: disabled / staging service ─────────────────────────────────
+  - name: staging-search
+    url: http://staging.internal:9000/mcp
+    description: Staging search service (currently disabled).
+    enabled: false

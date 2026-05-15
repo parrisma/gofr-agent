@@ -1,0 +1,155 @@
+[project]
+name = "gofr-common"
+version = "1.0.0"
+description = "Shared infrastructure library for GOFR projects (auth, logging, config, MCP utilities)"
+readme = "readme.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+
+# Core dependencies shared by ALL GOFR projects
+# All versions pinned per service_compatibility.md
+dependencies = [
+    # MCP Protocol
+    "mcp==1.23.1",
+    # Web Framework Stack
+    "pydantic==2.12.5",
+    "uvicorn==0.38.0",
+    "fastapi==0.115.12",
+    "starlette==0.45.3",
+    "sse-starlette==3.0.3",
+    # Authentication
+    "PyJWT==2.10.1",
+    # HTTP Client
+    "httpx==0.28.1",
+    # MCP OpenAPI Wrapper
+    "mcpo==0.0.19",
+    "python-dotenv==1.1.0",
+    "hvac==2.4.0",
+]
+
+[project.optional-dependencies]
+# Development dependencies
+dev = [
+    "pytest==9.0.2",
+    "pytest-asyncio==1.3.0",
+    "pytest-cov==7.0.0",
+    "black==25.11.0",
+    "ruff==0.14.8",
+    "pyright[nodejs]==1.1.407",
+]
+
+# Optional: PDF/document rendering (needed by gofr-doc, gofr-dig)
+pdf = [
+    "WeasyPrint>=60.0",
+    "Jinja2>=3.1.0",
+    "html2text>=2020.1.16",
+]
+
+# Optional: Graphing/plotting (needed by gofr-plot)
+plotting = [
+    "matplotlib>=3.5.0",
+]
+
+# Optional: HashiCorp Vault backend for centralized token/group storage
+vault = [
+    "hvac==2.4.0",
+]
+
+# All optional dependencies
+all = [
+    "gofr-common[dev,pdf,plotting,vault]",
+]
+
+[project.scripts]
+gofr-security-scan = "gofr_common.security_scan.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gofr_common"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/readme.md",
+    "/LICENSE",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]  # Line length handled by black
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+exclude = [
+    "src/gofr_common/auth/token_manager.py",  # Legacy CLI, superseded by auth_manager.py
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::RuntimeWarning:matplotlib",
+    "ignore::DeprecationWarning",
+]
+markers = [
+    "vault_integration: marks tests requiring a running Vault container (deselect with '-m \"not vault_integration\"')",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.0.2",
+    "pytest-asyncio==1.3.0",
+    "pytest-cov==7.0.0",
+    "black==25.11.0",
+    "ruff==0.14.8",
+    "pyright[nodejs]==1.1.407",
+    "bandit==1.9.2",
+]
+
+[tool.coverage.run]
+source = ["src/gofr_common"]
+omit = [
+    "*/__pycache__/*",
+    "*/tests/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+skip_empty = true
+sort = "Cover"
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101"]
+

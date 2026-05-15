@@ -1,0 +1,17 @@
+# SEQ Log Server — Production (persistent storage via mounted volumes)
+#
+# Build with a pinned image tag or digest in CI/CD:
+#   docker build \
+#     --build-arg SEQ_BASE_IMAGE=datalust/seq:<pinned-tag-or-digest> \
+#     -f docker/Dockerfile.seq.prod \
+#     -t gofr-seq-prod:latest .
+ARG SEQ_BASE_IMAGE=datalust/seq:latest
+FROM ${SEQ_BASE_IMAGE}
+
+ENV ACCEPT_EULA=Y \
+	SEQ_STORAGE=/data
+
+# /data persists events, indexes, and configuration.
+VOLUME ["/data"]
+
+EXPOSE 5341 80

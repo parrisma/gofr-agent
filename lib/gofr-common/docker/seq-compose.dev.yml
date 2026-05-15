@@ -1,0 +1,38 @@
+# SEQ Log Server — Development Compose (ephemeral)
+# No volumes — all data is discarded on container stop.
+#
+# Usage:
+#   docker compose -f docker/seq-compose.dev.yml up -d
+#   docker compose -f docker/seq-compose.dev.yml down
+
+name: gofr-seq-dev
+
+services:
+  seq:
+    build:
+      context: .
+      dockerfile: Dockerfile.seq.dev
+    image: gofr-seq-dev:latest
+    container_name: gofr-seq-dev
+    hostname: gofr-seq-dev
+    restart: "no"
+    ports:
+      - "${GOFR_SEQ_INGEST_PORT:-5341}:5341"   # Ingestion API (CLEF/JSON)
+      - "${GOFR_SEQ_UI_PORT:-5380}:80"          # Web UI
+    environment:
+      - ACCEPT_EULA=Y
+      - SEQ_FIRSTRUN_ADMINPASSWORDHASH=
+    # No volumes — ephemeral by design
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5341/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - gofr-net
+
+networks:
+  gofr-net:
+    external: true
+    name: gofr-net
