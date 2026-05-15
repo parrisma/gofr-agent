@@ -1,5 +1,5 @@
 # =============================================================================
-# gofr-agent Test MCP Fixture Services — Docker Swarm Stack
+# gofr-agent Test MCP Fixture Services - Docker Swarm Stack
 # =============================================================================
 # Four standalone MCP services (instruments, clients, trades, analytics)
 # that the gofr-agent can connect to for integration/e2e testing.
@@ -8,19 +8,19 @@
 # Set FIXTURE_TOKEN to whatever value you want clients to use.
 #
 # Deploy:
-#   docker stack deploy -c docker/compose.fixtures.yml gofr-fixtures
+#   docker stack deploy -c docker/compose.fixtures.yml gofr-agent-mcp-fixtures
 #
 # Remove:
-#   docker stack rm gofr-fixtures
+#   docker stack rm gofr-agent-mcp-fixtures
 #
 # Logs:
-#   docker service logs gofr-fixtures_instruments -f
+#   docker service logs gofr-agent-mcp-fixtures_mcp-instruments -f
 #
 # Port map (published on all swarm nodes):
-#   instruments  → host:8500  (internal 8500)
-#   clients      → host:8501  (internal 8501)
-#   trades       → host:8502  (internal 8502)
-#   analytics    → host:8503  (internal 8503)
+#   instruments  -> host:8500  (internal 8500)
+#   clients      -> host:8501  (internal 8501)
+#   trades       -> host:8502  (internal 8502)
+#   analytics    -> host:8503  (internal 8503)
 # =============================================================================
 
 version: "3.9"
@@ -28,11 +28,28 @@ version: "3.9"
 # ── Shared anchor ─────────────────────────────────────────────────────────────
 
 x-svc-defaults: &svc-defaults
-  image: gofr-agent-fixtures:latest
+  image: ${GOFR_FIXTURE_IMAGE_NAME:-gofr-agent-mcp-fixtures}:${GOFR_FIXTURE_IMAGE_TAG:-latest}
   networks:
     - fixtures-net
+  user: "10001:10001"
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  stop_grace_period: 15s
+  labels:
+    com.gofr.project: "gofr-agent"
+    com.gofr.stack: "gofr-agent-mcp-fixtures"
+    com.gofr.component: "test-mcp-fixture"
   deploy:
     replicas: 1
+    labels:
+      com.gofr.project: "gofr-agent"
+      com.gofr.stack: "gofr-agent-mcp-fixtures"
+      com.gofr.component: "test-mcp-fixture"
     restart_policy:
       condition: on-failure
       delay: 5s
@@ -41,15 +58,23 @@ x-svc-defaults: &svc-defaults
       parallelism: 1
       delay: 10s
       order: start-first
+    resources:
+      limits:
+        cpus: "0.50"
+        memory: 256M
+      reservations:
+        memory: 64M
 
 # ── Services ──────────────────────────────────────────────────────────────────
 
 services:
 
-  instruments:
+  mcp-instruments:
     <<: *svc-defaults
+    hostname: gofr-agent-mcp-instruments
     command: ["--service", "instruments", "--port", "8500"]
     environment:
+      SERVICE_NAME: "gofr-agent-mcp-instruments"
       SERVICE_PORT: "8500"
     ports:
       - target: 8500
@@ -68,10 +93,12 @@ services:
       start_period: 15s
       retries: 3
 
-  clients:
+  mcp-clients:
     <<: *svc-defaults
+    hostname: gofr-agent-mcp-clients
     command: ["--service", "clients", "--port", "8501"]
     environment:
+      SERVICE_NAME: "gofr-agent-mcp-clients"
       SERVICE_PORT: "8501"
     ports:
       - target: 8501
@@ -90,10 +117,12 @@ services:
       start_period: 15s
       retries: 3
 
-  trades:
+  mcp-trades:
     <<: *svc-defaults
+    hostname: gofr-agent-mcp-trades
     command: ["--service", "trades", "--port", "8502"]
     environment:
+      SERVICE_NAME: "gofr-agent-mcp-trades"
       SERVICE_PORT: "8502"
     ports:
       - target: 8502
@@ -112,10 +141,12 @@ services:
       start_period: 15s
       retries: 3
 
-  analytics:
+  mcp-analytics:
     <<: *svc-defaults
+    hostname: gofr-agent-mcp-analytics
     command: ["--service", "analytics", "--port", "8503"]
     environment:
+      SERVICE_NAME: "gofr-agent-mcp-analytics"
       SERVICE_PORT: "8503"
     ports:
       - target: 8503
@@ -138,5 +169,10 @@ services:
 
 networks:
   fixtures-net:
+    name: gofr-agent-mcp-fixtures-net
     driver: overlay
     attachable: true
+    labels:
+      com.gofr.project: "gofr-agent"
+      com.gofr.stack: "gofr-agent-mcp-fixtures"
+      com.gofr.component: "test-mcp-fixture-network"

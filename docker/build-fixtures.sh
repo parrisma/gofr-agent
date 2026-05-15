@@ -13,12 +13,21 @@
 # =============================================================================
 set -euo pipefail
 
-TAG="${1:-latest}"
-IMAGE="gofr-agent-fixtures:${TAG}"
-
 # Must be run from the project root so Docker can resolve all COPY paths.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PORTS_ENV="${PROJECT_ROOT}/lib/gofr-common/config/gofr_ports.env"
+
+if [[ -f "${PORTS_ENV}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "${PORTS_ENV}"
+    set +a
+fi
+
+TAG="${1:-${GOFR_FIXTURE_IMAGE_TAG:-latest}}"
+IMAGE_NAME="${GOFR_FIXTURE_IMAGE_NAME:-gofr-agent-mcp-fixtures}"
+IMAGE="${IMAGE_NAME}:${TAG}"
 
 cd "${PROJECT_ROOT}"
 
@@ -37,7 +46,7 @@ echo ""
 echo "Build complete: ${IMAGE}"
 echo ""
 echo "Deploy to Swarm:"
-echo "  docker stack deploy -c docker/compose.fixtures.yml gofr-fixtures"
+echo "  docker/fixtures-stack.sh start"
 echo ""
 echo "Remove stack:"
-echo "  docker stack rm gofr-fixtures"
+echo "  docker/fixtures-stack.sh stop"

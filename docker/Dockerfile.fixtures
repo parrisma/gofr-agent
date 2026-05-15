@@ -11,15 +11,14 @@
 # Build:
 #   docker/build-fixtures.sh
 #   # or manually:
-#   docker build -f docker/Dockerfile.fixtures -t gofr-agent-fixtures:latest .
+#   docker build -f docker/Dockerfile.fixtures -t gofr-agent-mcp-fixtures:latest .
 # =============================================================================
 
 FROM python:3.11-slim
 
-# ── System packages ──────────────────────────────────────────────────────────
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
+LABEL org.opencontainers.image.title="gofr-agent MCP fixture services" \
+    org.opencontainers.image.description="Standalone MCP fixture services for gofr-agent integration and e2e testing" \
+    org.opencontainers.image.source="https://github.com/parrisma/gofr-agent"
 
 # ── Install uv ───────────────────────────────────────────────────────────────
 RUN pip install --no-cache-dir uv
@@ -55,6 +54,8 @@ RUN uv venv $VIRTUAL_ENV \
 # ── Runtime environment ───────────────────────────────────────────────────────
 ENV VIRTUAL_ENV=/app/.venv
 ENV PYTHONPATH=/app
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 ENV PATH="/app/.venv/bin:$PATH"
 
 # ── Health probe helper (used by compose.fixtures.yml healthchecks) ───────────
