@@ -1,6 +1,10 @@
 # gofr-agent
 
-A pydantic-ai MCP Streamable-HTTP reasoning agent that orchestrates downstream MCP services.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![uv](https://img.shields.io/badge/package%20manager-uv-purple)](https://github.com/astral-sh/uv)
+
+A [pydantic-ai](https://github.com/pydantic/pydantic-ai) **MCP Streamable-HTTP reasoning agent** that orchestrates downstream MCP services.
 
 gofr-agent exposes a single MCP endpoint.  Clients (Claude Desktop, `mcpo`,
 the bundled CLI) send natural-language questions; the agent picks the right
@@ -54,7 +58,7 @@ Key components:
 
 ```bash
 # 1. Clone and enter the repo
-git clone <repo-url> gofr-agent && cd gofr-agent
+git clone https://github.com/parrisma/gofr-agent.git && cd gofr-agent
 
 # 2. Install dependencies (uv is the package manager)
 uv sync
@@ -64,8 +68,9 @@ cp services.yml.example services.yml
 $EDITOR services.yml
 
 # 4. Start the server (development — no auth)
-GOFR_AGENT_LLM_MODEL=openai:gpt-4o-mini \
-OPENAI_API_KEY=sk-... \
+#    Any OpenAI-compatible provider works; OpenRouter example:
+GOFR_AGENT_LLM_MODEL=openai:deepseek/deepseek-v4-pro \
+OPENROUTER_API_KEY=sk-or-... \
 uv run python -m app.main_mcp --no-auth
 
 # 5. Ask a question via the CLI
@@ -88,7 +93,7 @@ flags.
 | `GOFR_AGENT_JWT_SECRET` | `--jwt-secret` | — | JWT secret (required when auth enabled) |
 | `GOFR_AGENT_REQUIRE_AUTH` | `--no-auth` | `true` | Disable JWT auth for dev |
 | `GOFR_AGENT_SERVICES_FILE` | `--services-file` | `services.yml` | Path to services manifest |
-| `GOFR_AGENT_LLM_MODEL` | `--llm-model` | `openai:gpt-4o-mini` | pydantic-ai model string |
+| `GOFR_AGENT_LLM_MODEL` | `--llm-model` | `openai:deepseek/deepseek-v4-pro` | pydantic-ai model string |
 | `GOFR_AGENT_SESSION_POOL_SIZE` | `--pool-size` | `3` | Concurrent connections per service |
 | `GOFR_AGENT_SESSION_TTL_MINUTES` | — | `60` | Session expiry |
 | `GOFR_AGENT_TOOL_RESULT_MAX_CHARS` | — | `4000` | Truncation limit for tool results |
@@ -198,3 +203,26 @@ uv run ruff check app tests --fix
 | 8091 | mcpo OpenAI-compatible proxy |
 | 8092 | gofr-agent web UI (future) |
 | 8190–8192 | Test ports (mirror of above) |
+
+### OpenRouter
+
+The integration tests and the server both work with [OpenRouter](https://openrouter.ai)
+as an OpenAI-compatible provider. Set the following environment variables:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+export OPENROUTER_MODEL=deepseek/deepseek-v4-pro   # default used by tests
+```
+
+Run the live integration tests (requires API key):
+
+```bash
+OPENROUTER_API_KEY=sk-or-... \
+uv run python -m pytest tests/integration/test_openrouter.py -v -m openrouter
+```
+
+---
+
+## Licence
+
+[MIT](LICENSE) © 2026 parrisma

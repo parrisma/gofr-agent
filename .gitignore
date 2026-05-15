@@ -1,4 +1,4 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
@@ -9,43 +9,86 @@ dist/
 build/
 *.egg
 .eggs/
+MANIFEST
 
-# Virtual environments
+# ── Virtual environments ───────────────────────────────────────────────────────
 .venv/
 venv/
 env/
+ENV/
+.env/
 
-# uv
+# ── uv / pip ──────────────────────────────────────────────────────────────────
 uv.lock
+pip-wheel-metadata/
+.pip-cache/
 
-# Testing / coverage
+# ── Testing / coverage ────────────────────────────────────────────────────────
 .pytest_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .tox/
+nosetests.xml
+*.cover
 
-# IDE / editor
+# ── Type-checking ─────────────────────────────────────────────────────────────
+.pyright/
+.mypy_cache/
+.dmypy.json
+pyrightconfig.json
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+.project
+.settings/
+*.sublime-workspace
 
-# OS
+# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+desktop.ini
 
-# Secrets — NEVER commit these
+# ── Docker build artefacts ────────────────────────────────────────────────────
+.dockerignore.local
+
+# ── Secrets — NEVER commit any of these ──────────────────────────────────────
 lib/gofr-common/secrets/
 lib/gofr-common/scripts/data/auth/
 data/auth/
 data/sessions/
 data/storage/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.crt
+*.cer
+.jwt_secret
+vault_*
+*.token
+*_token
 
-# Logs
+# ── Runtime data ──────────────────────────────────────────────────────────────
 logs/
 *.log
+*.log.*
 
-# Local config overrides
+# ── Local config overrides ────────────────────────────────────────────────────
 services.yml
 .env
+.env.*
+!.env.example
 *.env.local
