@@ -72,6 +72,37 @@ class TestAskCli:
             result = runner.invoke(app, [*_TOKEN_FLAGS, "--session", "my-session", "Calc"])
         assert "my-session" in result.output
 
+    def test_ask_sends_max_steps(self) -> None:
+        captured_params: list[dict] = []
+
+        from contextlib import asynccontextmanager
+
+        client = MagicMock()
+        client.initialize = AsyncMock()
+
+        async def fake_call_tool(tool: str, params: dict) -> MagicMock:  # type: ignore[type-arg]
+            captured_params.append(params)
+            return _make_call_result({"answer": "ok", "session_id": "s", "tokens_used": 1})
+
+        client.call_tool = fake_call_tool
+
+        @asynccontextmanager
+        async def _fake_session_cm(r, w):  # type: ignore[return]
+            yield client
+
+        @asynccontextmanager
+        async def _fake_transport_cm(url, **kwargs):  # type: ignore[return]
+            yield MagicMock(), MagicMock(), None
+
+        with (
+            patch("app.cli.ask.streamablehttp_client", _fake_transport_cm),
+            patch("app.cli.ask.ClientSession", _fake_session_cm),
+        ):
+            result = runner.invoke(app, [*_TOKEN_FLAGS, "--max-steps", "12", "Calc"])
+
+        assert result.exit_code == 0
+        assert captured_params[0]["max_steps"] == 12
+
     def test_reset_calls_reset_session(self) -> None:
         call_results = {
             "reset_session": _make_call_result({"status": "ok", "session_id": "sid1"})

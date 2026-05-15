@@ -81,6 +81,68 @@ def _manifest(url: str) -> ServicesManifest:
     return ServicesManifest(services=[svc])
 
 
+def _fixture_services_manifest(
+    instruments_url: str,
+    clients_url: str,
+    trades_url: str,
+    analytics_url: str,
+) -> ServicesManifest:
+    """Return a manifest containing all synthetic finance fixture services."""
+    return ServicesManifest(
+        services=[
+            ServiceConfig(
+                name="instruments",
+                url=instruments_url,
+                description="Instrument reference data, spot prices, and OHLCV history",
+            ),
+            ServiceConfig(
+                name="clients",
+                url=clients_url,
+                description="Client master data, holdings, watchlists, and mandates",
+            ),
+            ServiceConfig(
+                name="trades",
+                url=trades_url,
+                description="Trade blotter retrieval, aggregation, and realised P&L",
+            ),
+            ServiceConfig(
+                name="analytics",
+                url=analytics_url,
+                description="Derived analytics for market data, positions, and executions",
+            ),
+        ]
+    )
+
+
+def _json_object_from_answer(answer: str) -> dict:
+    """Parse a JSON object returned by the LLM, tolerating markdown fences."""
+    text = answer.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1]).strip()
+    if not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1:
+            text = text[start:end + 1]
+    return json.loads(text)
+
+
+def _services_from_result_text(text: str) -> list[dict]:
+    """Parse list_services output across FastMCP result serialization shapes."""
+    data = json.loads(text)
+    services = data.get("services", data.get("result", [data])) if isinstance(data, dict) else data
+    return services
+
+
+def _services_from_result_content(content: list[object]) -> list[dict]:
+    """Parse list_services output from one or many text content items."""
+    services: list[dict] = []
+    for item in content:
+        services.extend(_services_from_result_text(item.text))  # type: ignore[attr-defined]
+    return services
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -140,6 +202,45 @@ async def or_agent_server(mock_mcp_url: str) -> str:  # type: ignore[misc]
     auth_service = _AllowAll()
     registry = ServiceRegistry(config)
     await registry.load_manifest(_manifest(mock_mcp_url))
+    agent = GofrAgent(config, registry, auth_service, model=model)
+    agent.build()
+    store = SessionStore(ttl_minutes=60)
+    mcp = create_mcp_server(config, registry, agent, store, auth_service)
+    app = AuthHeaderMiddleware(mcp.streamable_http_app())
+
+    port = _free_port()
+    host = "127.0.0.1"
+    thread = _AgentServerThread(app, host, port)
+    thread.start()
+    thread.wait_ready()
+
+    yield f"http://{host}:{port}/mcp"
+
+    thread.shutdown()
+    thread.join(timeout=10)
+    await registry.shutdown()
+
+
+@pytest.fixture()
+async def or_agent_server_with_fixture_services(
+    instruments_url: str,
+    clients_url: str,
+    trades_url: str,
+    analytics_url: str,
+) -> str:  # type: ignore[misc]
+    """Start gofr-agent backed by OpenRouter and all finance fixture services."""
+    model = _openrouter_model()
+    config = GofrAgentConfig()
+    auth_service = _AllowAll()
+    registry = ServiceRegistry(config)
+    await registry.load_manifest(
+        _fixture_services_manifest(
+            instruments_url,
+            clients_url,
+            trades_url,
+            analytics_url,
+        )
+    )
     agent = GofrAgent(config, registry, auth_service, model=model)
     agent.build()
     store = SessionStore(ttl_minutes=60)
@@ -242,7 +343,8 @@ class TestOpenRouterDirect:
 
         session = await session_store.get_or_create("or-direct-4")
         result = await agent.run(
-            "Use the mock__add tool to add 17 and 25, then tell me the result.",
+            "Call mock__add with a=17 and b=25. After the tool returns, "
+            "reply with only the numeric result and no other text.",
             session,
             token=_TOKEN,
         )
@@ -334,3 +436,57 @@ class TestOpenRouterViaMCP:
 
         data = json.loads(r2.content[0].text)  # type: ignore[union-attr]
         assert "99" in data["answer"]
+
+    async def test_ask_reasons_across_all_fixture_services(
+        self, or_agent_server_with_fixture_services: str
+    ) -> None:
+        """Agent can combine client, instrument, trade, and analytics services."""
+        headers = {"Authorization": f"Bearer {_TOKEN}"}
+
+        async with (
+            streamablehttp_client(
+                or_agent_server_with_fixture_services,
+                headers=headers,
+            ) as (r, w, _),
+            ClientSession(r, w) as client,
+        ):
+            await client.initialize()
+
+            services_result = await client.call_tool("list_services", {})
+            services = _services_from_result_content(services_result.content)
+            assert {svc["name"] for svc in services} == {
+                "instruments",
+                "clients",
+                "trades",
+                "analytics",
+            }
+
+            ask_result = await client.call_tool(
+                "ask",
+                {
+                    "session_id": "or-mcp-all-fixtures",
+                    "max_steps": 12,
+                    "question": (
+                        "Use the downstream tools, not prior knowledge, to answer this. "
+                        "Look up Meridian Capital, get its AAPL holding, resolve AAPL, "
+                        "get the current AAPL spot price, compute the position market value "
+                        "with analytics, and get realised P&L for Meridian Capital's AAPL "
+                        "trades. Return only compact JSON with these keys: client_id, ticker, "
+                        "instrument_name, quantity, spot_price, currency, market_value, "
+                        "realised_pnl, matched_trades, conclusion."
+                    ),
+                },
+            )
+
+        data = json.loads(ask_result.content[0].text)  # type: ignore[union-attr]
+        answer = _json_object_from_answer(data["answer"])
+
+        assert answer["client_id"] == "C001"
+        assert answer["ticker"] == "AAPL"
+        assert "Apple" in answer["instrument_name"]
+        assert answer["quantity"] == 5000
+        assert answer["spot_price"] == pytest.approx(189.45)
+        assert answer["currency"] == "USD"
+        assert answer["market_value"] == pytest.approx(947250.0)
+        assert answer["realised_pnl"] == pytest.approx(4600.0)
+        assert answer["matched_trades"] == 1

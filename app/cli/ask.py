@@ -39,6 +39,11 @@ def ask(
         "--token",
         help="Bearer token for authentication (or set GOFR_AGENT_TOKEN env var).",
     ),
+    max_steps: int = typer.Option(
+        10,
+        "--max-steps",
+        help="Maximum downstream tool-call iterations for this question.",
+    ),
 ) -> None:
     """Ask the gofr-agent a question."""
     if not token:
@@ -48,7 +53,16 @@ def ask(
             err=True,
         )
         raise typer.Exit(code=1)
-    asyncio.run(_run(question=question, session_id=session, reset=reset, url=url, token=token))
+    asyncio.run(
+        _run(
+            question=question,
+            session_id=session,
+            reset=reset,
+            url=url,
+            token=token,
+            max_steps=max_steps,
+        )
+    )
 
 
 async def _run(
@@ -57,6 +71,7 @@ async def _run(
     reset: str | None,
     url: str,
     token: str,
+    max_steps: int,
 ) -> None:
     headers = {"Authorization": f"Bearer {token}"}
     async with (
@@ -75,7 +90,7 @@ async def _run(
             typer.echo("Error: Provide a question or use --reset.", err=True)
             raise typer.Exit(code=1)
 
-        params: dict[str, object] = {"question": question}
+        params: dict[str, object] = {"question": question, "max_steps": max_steps}
         if session_id is not None:
             params["session_id"] = session_id
 
