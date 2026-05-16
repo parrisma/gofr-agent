@@ -18,6 +18,7 @@ tools from its connected downstream services and returns a grounded answer.
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Services manifest](#services-manifest)
+- [Results hub](#results-hub)
 - [MCP tools](#mcp-tools)
 - [CLI](#cli)
 - [Development](#development)
@@ -93,6 +94,12 @@ The server listens on **port 8090** by default.
 | `GOFR_AGENT_MCP_PORT` | `8090` | MCP server port |
 | `GOFR_AGENT_MCPO_PORT` | `8091` | OpenAI-compatible proxy port |
 | `GOFR_AGENT_SERVICES_FILE` | unset | Optional services manifest path |
+| `GOFR_AGENT_HUB_ENABLED` | `false` | Enable the built-in results hub for descriptor handoff |
+| `GOFR_AGENT_HUB_URL` | unset | Public MCP URL other services use to call this agent's hub tools |
+| `GOFR_AGENT_HUB_DEFAULT_TTL_SECONDS` | `3600` | Default descriptor TTL, capped per stored result |
+| `GOFR_AGENT_HUB_MAX_PAYLOAD_BYTES` | `524288` | Maximum JSON payload size accepted by `_store_result` |
+| `GOFR_AGENT_HUB_MAX_RESULTS` | `256` | Maximum in-memory hub records kept at once |
+| `GOFR_AGENT_HUB_PROTOCOL_VERSION` | `1` | Reserved protocol version for hub registration and descriptors |
 | `GOFR_AGENT_LLM_MODEL` | `openai:gpt-4o-mini` | Default pydantic-ai model |
 | `GOFR_AGENT_AGENT_TIMEOUT_SECONDS` | `120` | Wall-clock timeout for a single `ask` run |
 | `GOFR_AGENT_MAX_STEPS` | `10` | Default step limit when callers omit `max_steps` |
@@ -121,16 +128,45 @@ Copy `services.yml.example` to `services.yml` and fill in your services:
 
 ```yaml
 services:
-  - name: rag
-    url: http://gofr-rag:8100/mcp
-    description: Internal knowledge base search
-    token_env: RAG_MCP_TOKEN   # reads token from this env var
+  - name: instruments
+    url: http://gofr-instruments:8100/mcp
+    description: Instrument metadata and OHLCV history
+    token_env: INSTRUMENTS_MCP_TOKEN
+    hub_callback_token_env: INSTRUMENTS_HUB_CALLBACK_TOKEN
     enabled: true
 ```
+
+Use Docker service names or other routable hostnames reachable from the
+`gofr-agent` container. Do not use `localhost` or `127.0.0.1` for service-to-
+service MCP traffic.
+
+`hub_callback_token_env` is optional and is needed only for services that
+publish to or fetch from the results hub. Keep callback credentials in env vars
+rather than inline secrets.
 
 Services can also be registered at runtime via the `register_service` MCP tool
 when `GOFR_AGENT_DYNAMIC_REGISTRATION_ENABLED=true` and the target host matches
 `GOFR_AGENT_ALLOWED_SERVICE_HOSTS`.
+
+## Results hub
+
+When `GOFR_AGENT_HUB_ENABLED=true`, `gofr-agent` also acts as a process-local
+results hub for descriptor handoff between MCP services.
+
+- Producer services call `_store_result` and return only a descriptor such as
+  `{"kind":"gofr.result_ref", ...}` to the model.
+- Consumer services accept descriptor-enabled arguments and fetch the
+  authoritative payload through `_get_result` or `_describe_result`.
+- The model and UI should treat descriptors as internal references, not as
+  user-facing payloads. Large JSON payloads stay out of model context and out
+  of reasoning-event streams.
+- Reserved protocol tools `_register_results_hub`, `_store_result`,
+  `_get_result`, and `_describe_result` are not exposed in the model-facing
+  tool list.
+- `list_services` reports safe hub capability metadata
+  (`supports_results_hub`, `can_publish_results`, `can_consume_results`,
+  `result_types`, `registration_error`) but never returns bearer tokens or
+  callback credentials.
 
 ---
 
@@ -141,7 +177,7 @@ gofr-agent exposes these tools over MCP:
 | Tool | Description |
 |------|-------------|
 | `ping` | Health check — returns status, timestamp, version |
-| `list_services` | List all registered downstream services and their health |
+| `list_services` | List registered downstream services, their health, tools, and safe hub-capability metadata |
 | `ask` | Send a question to the reasoning agent |
 | `reset_session` | Clear conversation history for a session |
 | `register_service` | Dynamically register a new downstream service |

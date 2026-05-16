@@ -14,6 +14,60 @@ only. Do not run raw `pytest`, do not use `pip`, and do not use `localhost` or
 
 Do not `git add`, `commit`, or `push` unless explicitly asked.
 
+## Pinned Names And Constants
+
+Do not invent alternatives for these names; the plan and code must agree.
+
+Env vars:
+
+- `GOFR_AGENT_HUB_ENABLED`
+- `GOFR_AGENT_HUB_URL`
+- `GOFR_AGENT_HUB_DEFAULT_TTL_SECONDS`
+- `GOFR_AGENT_HUB_MAX_PAYLOAD_BYTES`
+- `GOFR_AGENT_HUB_MAX_RESULTS`
+- `GOFR_AGENT_HUB_PROTOCOL_VERSION`
+- `GOFR_FIXTURES_HUB_CALLBACK_TOKEN` - fixture's outbound callback token
+- `GOFR_AGENT_HUB_CALLBACK_TOKEN` - optional default callback token for any
+  in-process gofr-agent helper that calls its own hub during tests
+
+Fixed dev token literals (used only in dev/CI through `DevAuthService`):
+
+- `dev-admin-token` - existing
+- `dev-read-token` - existing
+- `dev-fixtures-hub-token` - new; granted only `GoFRAgentHubStore` and
+  `GoFRAgentHubFetch`
+
+Reserved hub protocol tool names:
+
+- `_register_results_hub` - on downstream services
+- `_store_result`, `_get_result`, `_describe_result` - on gofr-agent
+
+Descriptor / protocol identifiers:
+
+- `descriptor.kind`: `gofr.result_ref`
+- `descriptor.version`: `1`
+- `protocol_version`: `1`
+- Initial `result_type`: `ohlcv_bars`
+- Initial `schema_id`: `gofr.ohlcv_bars.v1`
+
+GUIDs:
+
+- `secrets.token_urlsafe(32)`. Do not use `uuid4()`, do not use sequential ids.
+
+Payload size measurement (used identically in store, producer precheck, and
+tests):
+
+```
+json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+```
+
+Descriptor-enabled tool detection:
+
+- A tool argument is descriptor-enabled iff its JSON schema includes
+  `"x-gofr-result-descriptor": true`. The agent wrapper must use this exact
+  marker to decide whether to skip scratchpad enrichment for that argument.
+  Do not pattern-match on field names like `bars_ref`.
+
 ## Design Invariants
 
 The implementation must preserve these rules throughout every phase:
@@ -71,10 +125,17 @@ Each phase follows this order:
 Required validation commands after each phase:
 
 ```
-./scripts/run_tests.sh -k "<phase-specific selector>" -v
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh <phase-specific test files> -v
 ./scripts/run_tests.sh -v
 ```
+
+`./scripts/run_tests.sh -v` already runs the code-quality gate first, so do not
+add a separate quality invocation unless you are iterating on lint/type fixes
+- in that case use `./scripts/run_tests.sh --quality`.
+
+Prefer file-scoped runs over `-k` for the targeted step. Use `-k` only when you
+need a narrow keyword inside a file (for example `-k "oversize"`). Coarse
+selectors like `-k tool_factory` will silently include unrelated tests.
 
 If the full suite fails, do not proceed to the next phase. Diagnose the failure.
 If it is clearly unrelated and cannot be safely fixed within the phase, stop and
@@ -87,7 +148,8 @@ full validation set passes.
 
 | Phase | Status | Required Evidence |
 |-------|--------|-------------------|
-| 0 | TODO | Real `_store_result` reentrancy passes, config/auth mapping proven, full suite passes |
+| 0a | TODO | Config + auth + ServiceConfig callback fields pass, full suite passes |
+| 0b | TODO | Real `_store_result` reentrancy passes, full suite passes |
 | 1 | TODO | Models/errors tests pass, full suite passes |
 | 2 | TODO | Store tests pass, full suite passes |
 | 3 | TODO | Hub MCP tool tests and hidden-tool tests pass, full suite passes |
@@ -99,11 +161,10 @@ full validation set passes.
 | 8 | TODO | Positive and negative end-to-end tests pass, full suite passes |
 | 9 | TODO | Docs/example validation and full suite pass |
 
-## Phase 0 - Real Reentrancy Spike, Config, And Credential Decisions
+## Phase 0a - Config, Permissions, And Callback Token Plumbing
 
-Purpose: prove the hardest runtime assumption before building the rest. A
-fixture service must call the real `_store_result` path while gofr-agent is
-still waiting for that fixture tool response.
+Purpose: introduce the configuration, permission, and callback-token surface
+that the rest of the work depends on, without any new MCP tools yet.
 
 Files likely touched:
 
@@ -111,18 +172,15 @@ Files likely touched:
 |------|-----|
 | `app/config.py` | Hub config fields and URL validation |
 | `app/auth/permissions.py` | Hub activity constants |
-| `app/auth/_dev_auth_service.py` | Dev token with hub activities |
+| `app/auth/_dev_auth_service.py` | `dev-fixtures-hub-token` with only hub activities |
+| `app/auth/__init__.py` | Re-export `AGENT_HUB_*` if existing pattern requires it |
 | `app/services/__init__.py` | `hub_callback_token` / `hub_callback_token_env` on `ServiceConfig` |
-| `app/mcp_server/mcp_server.py` | Minimal final-shaped `_store_result` hub tool |
-| `app/hub/__init__.py` | New package if needed for spike code |
-| `app/hub/models.py` | Minimal final-shaped store request/descriptor models |
-| `app/hub/store.py` | Minimal final-shaped in-process store |
-| `docker/mcp_fixtures/serve.py` | Reentrant producer spike tool |
-| `docker/compose.fixtures.yml` | Inject fixture callback token if needed |
+| `app/hub/__init__.py` | New package |
+| `app/hub/auth.py` | `ServicePrincipal` and `resolve_service_principal(token, registry)` helper |
 | `tests/unit/test_config.py` | Hub config validation |
 | `tests/unit/test_auth_permissions.py` | Hub activity constants |
 | `tests/unit/test_services_models.py` | Callback token env resolution and non-leakage |
-| `tests/integration/test_hub_reentrancy.py` | Real reentrancy spike |
+| `tests/unit/test_hub_auth.py` | Token-to-service-principal mapping |
 
 Tests to add first:
 
@@ -135,26 +193,29 @@ Tests to add first:
    - `hub_url` accepts an HTTPS DNS/service URL for production;
    - env parsing works for `GOFR_AGENT_HUB_*` values.
 2. `tests/unit/test_auth_permissions.py`
-   - `GoFRAgentHubStore`, `GoFRAgentHubFetch`, and optional
-     `GoFRAgentHubRegister` constants exist;
-   - hub activities are included in `ALL_ACTIVITIES` only if this repo's auth
-     conventions require that list to enumerate all known activities;
-   - ordinary read/ask dev tokens do not grant hub activities.
+   - `AGENT_HUB_STORE`, `AGENT_HUB_FETCH`, and optional `AGENT_HUB_REGISTER`
+     string constants exist with values `GoFRAgentHubStore`,
+     `GoFRAgentHubFetch`, `GoFRAgentHubRegister`;
+   - if existing convention requires `ALL_ACTIVITIES` to enumerate every
+     known activity, the new ones are included;
+   - `dev-admin-token` and `dev-read-token` do not grant hub activities;
+   - `dev-fixtures-hub-token` grants only `AGENT_HUB_STORE` and
+     `AGENT_HUB_FETCH`.
 3. `tests/unit/test_services_models.py`
    - `hub_callback_token_env` resolves from env like `token_env`;
    - explicit `hub_callback_token` takes precedence over env;
    - missing callback token is allowed for non-hub services;
-   - model dump/list-services helper does not expose callback token values.
-4. `tests/integration/test_hub_reentrancy.py`
-   - fixture exposes a tool such as `debug_reentrant_store_result`;
-   - when called through gofr-agent, that tool calls gofr-agent `_store_result`
-     before returning;
-   - returned producer output contains a descriptor with `kind`, `version`,
-     `result_guid`, and `hub_service`;
-   - returned producer output does not contain the raw payload;
-   - five concurrent calls complete within a bounded timeout and produce unique
-     GUIDs;
-   - missing/invalid callback token is rejected with a structured error.
+   - `model_dump()` of `ServiceConfig` excludes the resolved callback token
+     value when called with a `safe=True` flag (or equivalent helper used by
+     `list_services`).
+4. `tests/unit/test_hub_auth.py`
+   - `resolve_service_principal(token, registry)` returns `None` for unknown
+     tokens;
+   - returns the matching `ServicePrincipal` (service name, registered
+     `result_types`, `can_publish`, `can_consume`) for a token registered as
+     a service callback token;
+   - uses `secrets.compare_digest` semantics (no early return on length);
+   - never logs the raw token value.
 
 Implementation steps:
 
@@ -162,46 +223,110 @@ Implementation steps:
    `hub_default_ttl_seconds`, `hub_max_payload_bytes`, `hub_max_results`,
    `hub_protocol_version`.
 2. Validate config in `GofrAgentConfig.from_env()` or pydantic validators.
-   Reject local-only hub URLs when hub is enabled.
+   Reject local-only hub URLs when `hub_enabled` is true.
 3. Add hub permission constants in `app/auth/permissions.py`:
    `AGENT_HUB_STORE = "GoFRAgentHubStore"`,
-   `AGENT_HUB_FETCH = "GoFRAgentHubFetch"`, and optionally
-   `AGENT_HUB_REGISTER = "GoFRAgentHubRegister"`.
-4. Update `DevAuthService` with a dedicated fixture callback token, for
-   example `dev-hub-token`, that grants only the hub activities needed for the
-   spike. Do not grant hub activities to `dev-read-token`.
+   `AGENT_HUB_FETCH = "GoFRAgentHubFetch"`, optional
+   `AGENT_HUB_REGISTER = "GoFRAgentHubRegister"`. Add to `ALL_ACTIVITIES` only
+   if the existing convention requires it.
+4. Update `DevAuthService` with `dev-fixtures-hub-token` mapped to the two hub
+   activities and nothing else.
 5. Extend `ServiceConfig` with optional `hub_callback_token` and
-   `hub_callback_token_env`. Resolve env values in the existing model validator.
-   Never include these fields in `list_services` responses or logs.
-6. Implement token-to-service lookup using configured callback tokens. Use
-   `secrets.compare_digest()` or a hashed lookup. Never log token values.
-7. Implement a minimal final-shaped `ResultStore` and `_store_result` path.
-   It may be small in Phase 0, but it must use the final names and final
-   request/response shape so later phases extend it instead of replacing it.
-8. `_store_result` must do real work: auth guard, token-to-service check,
-   payload-size check, store mutation under a lock, descriptor creation, and
-   structured error on failure.
-9. Fixture spike tool reads `GOFR_AGENT_HUB_URL` and its callback token env,
-   opens a fresh MCP streamable HTTP client to gofr-agent, calls
-   `_store_result`, receives the descriptor, and returns only that descriptor.
-10. Do not add a no-op echo callback. Do not call `_store_result` after the
-    fixture tool has returned; that does not prove reentrancy.
+   `hub_callback_token_env`, resolved by the existing `_resolve_token_env`
+   model validator. Add a `safe_dump()` (or equivalent) that excludes both
+   `token` and `hub_callback_token` for use by `list_services` and logs.
+6. Implement `app/hub/auth.py` with `ServicePrincipal` (service name,
+   `result_types`, `can_publish`, `can_consume`) and
+   `resolve_service_principal(token: str, registry: ServiceRegistry) -> ServicePrincipal | None`.
+   The lookup must walk the registry's hub-capable services, compare callback
+   tokens with `secrets.compare_digest`, and never include token values in
+   logs. This helper is the single source of truth used by all hub tools.
+7. Add `tests/code_quality/test_code_quality.py::MIGRATED_LOGGING_FILES`
+   entries for any new `app/hub/*.py` modules introduced in this phase.
 
 Validation commands:
 
 ```
-./scripts/run_tests.sh -k "test_config or test_auth_permissions or test_services_models" -v
-./scripts/run_tests.sh -k hub_reentrancy -v
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh tests/unit/test_config.py tests/unit/test_auth_permissions.py tests/unit/test_services_models.py tests/unit/test_hub_auth.py -v
 ./scripts/run_tests.sh -v
 ```
 
-Phase 0 checkpoint:
+Phase 0a checkpoint:
+
+- Hub config fields are typed and validated.
+- Hub activities exist and are not granted to ordinary tokens.
+- `ServiceConfig` carries callback token info but never leaks it.
+- `resolve_service_principal` works deterministically.
+- Full suite passes.
+
+## Phase 0b - Real `_store_result` Reentrancy Spike
+
+Purpose: prove the hardest runtime assumption before building the rest. A
+fixture service must call the real `_store_result` path while gofr-agent is
+still waiting for that fixture tool response.
+
+Files likely touched:
+
+| File | Why |
+|------|-----|
+| `app/hub/models.py` | Minimal final-shaped store request/descriptor models |
+| `app/hub/store.py` | Minimal final-shaped in-process store |
+| `app/hub/errors.py` | Minimal final-shaped error helpers used by the spike |
+| `app/mcp_server/mcp_server.py` | Register `_store_result` hub tool with final-shape behaviour |
+| `docker/mcp_fixtures/serve.py` | Reentrant producer spike tool |
+| `docker/compose.fixtures.yml` | Inject `GOFR_FIXTURES_HUB_CALLBACK_TOKEN` and `GOFR_AGENT_HUB_URL` |
+| `tests/integration/test_hub_reentrancy.py` | Real reentrancy spike |
+
+Tests to add first (`tests/integration/test_hub_reentrancy.py`):
+
+1. fixture exposes a tool named `debug_reentrant_store_result` returning only
+   a descriptor;
+2. when called through gofr-agent, that tool calls gofr-agent `_store_result`
+   before its own response is sent;
+3. returned producer output is a descriptor with `kind == "gofr.result_ref"`,
+   `version == 1`, a non-empty `result_guid`, and `hub_service == "gofr-agent"`;
+4. returned producer output does not contain the raw payload anywhere;
+5. five concurrent calls complete within 5 seconds and produce unique GUIDs;
+6. missing or invalid `GOFR_FIXTURES_HUB_CALLBACK_TOKEN` causes a structured
+   `hub.unauthorised` error surfaced through the producer.
+
+Implementation steps:
+
+1. Implement minimal `ResultDescriptor`, `StoreResultRequest`, and
+   `StoreResultResponse` pydantic models using the pinned constants. These are
+   the same models Phase 1 will extend; do not invent throwaway shapes.
+2. Implement minimal `ResultStore.store(...)` returning a descriptor. Use
+   `secrets.token_urlsafe(32)` for `result_guid` and the pinned canonical JSON
+   serialization for size measurement. TTL/capacity are enforced even at this
+   stage but may use simple defaults.
+3. Register `_store_result` as a FastMCP tool in `app/mcp_server/mcp_server.py`.
+   First statement is `_guard(auth_service, AGENT_HUB_STORE)`. Second statement
+   resolves the principal via `resolve_service_principal`. Reject if missing.
+4. Reject store requests where `producer_service` does not match the resolved
+   principal. Use `hub.unregistered_service`.
+5. Add the fixture spike tool to `docker/mcp_fixtures/serve.py`. It reads
+   `GOFR_AGENT_HUB_URL` and `GOFR_FIXTURES_HUB_CALLBACK_TOKEN`, opens a fresh
+   MCP streamable HTTP client, calls `_store_result`, and returns only the
+   descriptor. Do not call `_store_result` after the fixture tool has returned;
+   that does not prove reentrancy.
+6. Update `docker/compose.fixtures.yml` so the fixtures service receives
+   `GOFR_AGENT_HUB_URL=http://gofr-agent:8090/mcp` and
+   `GOFR_FIXTURES_HUB_CALLBACK_TOKEN=dev-fixtures-hub-token`.
+7. Do not add a no-op echo callback. The spike must exercise the real store.
+
+Validation commands:
+
+```
+./scripts/run_tests.sh tests/integration/test_hub_reentrancy.py -v
+./scripts/run_tests.sh -v
+```
+
+Phase 0b checkpoint:
 
 - `_store_result` is reachable reentrantly from a fixture service.
 - Concurrent reentrant stores do not deadlock.
-- Callback token mapping proves the caller is the registered service.
-- Local-only hub URLs are rejected.
+- Producer principal mismatch is rejected.
+- Missing/invalid callback token is rejected.
 - Full suite passes.
 
 If any checkpoint item fails, stop. Do not proceed to Phase 1.
@@ -239,23 +364,22 @@ Tests to add first:
 
 Implementation steps:
 
-1. Define constants for descriptor kind, descriptor version, and protocol
-   version. Keep them in one module.
-2. Define pydantic models for descriptor, metadata, store/get/describe
-   requests, and store/get/describe responses.
+1. Reuse the constants pinned in this plan (`gofr.result_ref`, descriptor
+   `version` 1, `protocol_version` 1). Keep them in `app/hub/models.py`.
+2. Extend Phase 0b's pydantic models to the full spec shape: descriptor,
+   metadata, store/get/describe requests, and store/get/describe responses.
 3. Keep payload typed as JSON-compatible data. Reject binary/blob payloads in
    v1 by validation or by store serialization.
 4. Implement helper methods for structural descriptor validation that consumers
    can call before hub fetch.
-5. Define a small `HubErrorCode` enum or string constants and a helper to build
-   `McpError(ErrorData(...))` later.
+5. Define string constants for hub error codes (matching the spec) and a
+   helper to build `McpError(ErrorData(...))`. Keep them in `app/hub/errors.py`.
 6. Do not perform store mutation or MCP registration work in this phase.
 
 Validation commands:
 
 ```
-./scripts/run_tests.sh -k "hub_models or hub_errors" -v
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh tests/unit/test_hub_models.py tests/unit/test_hub_errors.py -v
 ./scripts/run_tests.sh -v
 ```
 
@@ -279,40 +403,44 @@ Files likely touched:
 
 Tests to add first:
 
-1. `store()` returns a descriptor with a cryptographically random GUID.
+1. `store()` returns a descriptor with `secrets.token_urlsafe(32)`-shaped GUID
+   (43-char URL-safe base64).
 2. Two stored results never share a GUID across a large sample.
 3. Payload plus authoritative metadata can be fetched by GUID before expiry.
 4. Fetch after expiry returns `hub.expired_result`.
 5. Unknown GUID returns `hub.unknown_result`.
-6. Oversized payload returns `hub.oversized_result`.
-7. Store at max count returns `hub.capacity_exceeded` or evicts only if the
-   spec is updated to allow eviction. Prefer rejection for v1.
+6. Oversized payload returns `hub.oversized_result`. Size is measured with the
+   pinned canonical JSON serialization; the test uses the same helper.
+7. Store at max count returns `hub.capacity_exceeded`. Eviction is not allowed
+   in v1; prefer rejection.
 8. Requested TTL is capped by config.
-9. Zero or negative TTL is rejected.
+9. Zero or negative TTL is rejected with `hub.malformed_request`.
 10. Authoritative metadata is not affected by mutating advisory descriptor
     fields after store.
-11. Tests use an injectable clock; do not use real sleeps.
-12. Concurrent store/fetch operations are safe.
+11. Tests use an injectable clock (`app.hub.clock.Clock`); do not use
+    `time.sleep` or `asyncio.sleep` for time progression.
+12. Concurrent store/fetch operations are safe (use `asyncio.gather`).
 
 Implementation steps:
 
-1. Use `secrets.token_urlsafe(32)` or an equivalent cryptographic random source
-   for GUIDs. Do not use sequential IDs or predictable hashes.
-2. Use canonical JSON serialization to measure payload bytes. Use the same
-   measurement in tests and implementation.
+1. Use `secrets.token_urlsafe(32)` for GUIDs. Do not use `uuid4()` or sequential
+   ids.
+2. Define a single `payload_size_bytes(payload)` helper using the pinned
+   canonical JSON serialization, exported for use in store, producer precheck,
+   and tests.
 3. Store payload and authoritative metadata in an internal record keyed by GUID.
-4. Use an `asyncio.Lock` or equivalent if store methods are called from async
-   MCP tools.
-5. Delete expired entries during get/describe/store and optionally through a
+4. Use `asyncio.Lock` since store methods are called from async MCP tools.
+5. Define `app/hub/clock.py::Clock` with `monotonic()` and a deterministic test
+   double. Inject it into the store.
+6. Delete expired entries during get/describe/store and optionally through a
    sweep helper.
-6. Return structured hub errors; do not raise raw exceptions past the hub
+7. Return structured hub errors; do not raise raw exceptions past the hub
    boundary.
 
 Validation commands:
 
 ```
-./scripts/run_tests.sh -k hub_store -v
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh tests/unit/test_hub_store.py -v
 ./scripts/run_tests.sh -v
 ```
 
@@ -332,10 +460,10 @@ Files likely touched:
 
 | File | Why |
 |------|-----|
-| `app/mcp_server/mcp_server.py` | Register `_store_result`, `_get_result`, `_describe_result` |
-| `app/agent/system_prompt.py` | Exclude reserved protocol tools from prompt |
-| `app/agent/tool_factory.py` | Exclude reserved protocol tools from model tool surface |
-| `app/services/discovery.py` | Add/propagate `model_visible` if needed |
+| `app/mcp_server/mcp_server.py` | Register `_store_result`, `_get_result`, `_describe_result` (extends Phase 0b) |
+| `app/agent/tool_factory.py` | Single canonical filter point for reserved protocol tool names; consumed by system prompt |
+| `app/agent/system_prompt.py` | Use the filtered tool list from `tool_factory`; do not implement a second filter |
+| `app/services/discovery.py` | Carry a `model_visible: bool` flag on `MCPToolInfo` if needed |
 | `tests/unit/test_mcp_server_hub_tools.py` | Tool auth, schemas, and error paths |
 | `tests/unit/test_system_prompt.py` | Reserved protocol tools hidden |
 | `tests/unit/test_tool_factory.py` | Reserved protocol tools hidden, normal underscore tools preserved |
@@ -362,29 +490,30 @@ Tests to add first:
 
 Implementation steps:
 
-1. Register `_store_result`, `_get_result`, and `_describe_result` in
+1. Extend `_store_result` from Phase 0b to enforce result-type capabilities and
+   register `_get_result` and `_describe_result` in
    `app/mcp_server/mcp_server.py`.
 2. The first statement in each FastMCP hub tool must be `_guard(auth_service,
-   REQUIRED_ACTIVITY)`, per the repository MCP tool pattern.
-3. After guard, extract the bearer token through existing request/auth context.
-   If no helper exists, add one small helper near existing auth extraction.
-4. Map the callback token to a registered service using the Phase 0 explicit
-   callback-token mapping.
-5. Enforce registration capability: `can_publish` for store, `can_consume` for
+   REQUIRED_ACTIVITY)`. The existing `_guard` returns the token; pass it to
+   `resolve_service_principal` from Phase 0a as the second statement.
+3. Enforce registration capability: `can_publish` for store, `can_consume` for
    get/describe.
-6. Enforce registered `result_types` on store and get/describe.
-7. Convert all hub errors to `McpError(ErrorData(...))`.
-8. Add exact-name filtering for reserved protocol tool names, or add
-   `model_visible = false` and filter on that flag. Do not use a blanket
-   `name.startswith("_")` rule.
-9. Make sure `list_services` may show capability metadata but never reveals
-   callback tokens or payloads.
+4. Enforce registered `result_types` on store and get/describe.
+5. Convert all hub errors to `McpError(ErrorData(...))` using the helper from
+   Phase 1. Never raise raw exceptions across the MCP boundary.
+6. Hidden-tool filtering: add a single `RESERVED_PROTOCOL_TOOLS` constant in
+   `app/agent/tool_factory.py`. The factory must drop any tool whose name is
+   in the set or whose `model_visible` flag is `False`. `system_prompt.py` must
+   consume the factory output, not re-filter. Do not use
+   `name.startswith("_")`.
+7. `list_services` must use `ServiceConfig.safe_dump()` (or equivalent) and
+   must never reveal callback tokens or payloads. Add an explicit assertion in
+   tests.
 
 Validation commands:
 
 ```
-./scripts/run_tests.sh -k "mcp_server_hub_tools or system_prompt or tool_factory" -v
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh tests/unit/test_mcp_server_hub_tools.py tests/unit/test_system_prompt.py tests/unit/test_tool_factory.py -v
 ./scripts/run_tests.sh -v
 ```
 
@@ -424,22 +553,27 @@ Tests to add first:
 
 Implementation steps:
 
-1. During tool discovery, keep enough metadata to know `_register_results_hub`
-   exists, but do not expose it to the model.
-2. After discovery and before marking registration complete, call
-   `_register_results_hub` using gofr-agent's existing outbound service
-   identity.
+1. During tool discovery, propagate `model_visible=False` for the reserved
+   `_register_results_hub` tool so it is not surfaced to the model, but keep
+   it in `MCPToolInfo` for the registry.
+2. Extend `ServiceRegistry._register_one`: after `discover_tools` succeeds, if
+   the service exposes `_register_results_hub` and `GOFR_AGENT_HUB_ENABLED` is
+   true, call it via the existing pool session using gofr-agent's outbound
+   service identity. The existing `_record_success` call must follow, even if
+   hub registration fails; in that case set `registration_error` and clear
+   `supports_results_hub`.
 3. Build the registration request from `GofrAgentConfig` and the reserved hub
-   tool names.
-4. Do not include callback credentials in the registration request.
-5. Store registration response and errors in service registry state.
+   tool names. Do not include callback credentials.
+4. Reject incompatible protocol versions and record `registration_error`. Do
+   not raise; the service stays usable as a non-hub service.
+5. Persist registration capability metadata on the registry entry even on
+   rejection (with `supports_results_hub=False`).
 6. Keep non-hub service behaviour unchanged.
 
 Validation commands:
 
 ```
-./scripts/run_tests.sh -k registry_hub_registration -v
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh tests/integration/test_registry_hub_registration.py -v
 ./scripts/run_tests.sh -v
 ```
 
@@ -487,8 +621,7 @@ Implementation steps:
 Validation commands:
 
 ```
-./scripts/run_tests.sh -k "services_models or mcp_server_integration" -v
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh tests/unit/test_services_models.py tests/integration/test_mcp_server_integration.py -v
 ./scripts/run_tests.sh -v
 ```
 
@@ -543,9 +676,7 @@ Implementation steps:
 Validation commands:
 
 ```
-./scripts/run_tests.sh -k instruments_service -v
-./scripts/run_tests.sh -k hub_reentrancy -v
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh tests/integration/test_instruments_service.py tests/integration/test_hub_reentrancy.py -v
 ./scripts/run_tests.sh -v
 ```
 
@@ -598,9 +729,7 @@ Implementation steps:
 Validation commands:
 
 ```
-./scripts/run_tests.sh -k analytics_service -v
-./scripts/run_tests.sh -k hub_negative_paths -v
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh tests/integration/test_analytics_service.py tests/integration/test_hub_negative_paths.py -v
 ./scripts/run_tests.sh -v
 ```
 
@@ -630,32 +759,41 @@ Tests to add first:
 
 1. Tool wrapper passes descriptor objects through without expanding payloads.
 2. Descriptor-enabled analytics tool missing `bars_ref` triggers `ModelRetry`
-   with a concise corrective message.
-3. Wrapper does not auto-substitute inline bars from `AgentDeps` scratchpad for
-   descriptor-enabled tools.
-4. Legacy non-descriptor workflows can still use the scratchpad fallback.
+   with a concise corrective message that names the missing argument.
+3. Wrapper does not auto-substitute inline bars from `AgentDeps.artifacts` for
+   any argument whose JSON schema has
+   `"x-gofr-result-descriptor": true`.
+4. Legacy non-descriptor required args still receive scratchpad enrichment via
+   `_enrich_missing_args` (regression for current behaviour in
+   `app/agent/tool_factory.py`).
 5. System prompt tells the model to forward descriptors verbatim and not expand
    payloads.
 6. System prompt does not list reserved hub protocol tools.
-7. Descriptor summary is wrapped in the same sentinel convention as tool output.
-8. Event/log payload truncation does not expose full bars arrays.
+7. Descriptor `summary` is wrapped in `_TOOL_DATA_START`/`_TOOL_DATA_END`
+   sentinels (the existing convention in `app/agent/tool_factory.py`).
+8. For descriptor-enabled tool calls, `EventCollector` payload size is at or
+   below `tool_result_max_chars` and does not include any list value longer
+   than 32 elements.
 
 Implementation steps:
 
-1. Detect descriptor-enabled tools from their schemas or registry metadata.
-2. For descriptor-enabled required arguments, prefer explicit descriptor passing.
-3. If the model omits a required descriptor, raise `ModelRetry`; do not silently
-   substitute full payloads.
-4. Keep descriptor metadata in `AgentDeps` only for traceability and retry
+1. In `_enrich_missing_args` (or a wrapper around it), skip enrichment for any
+   required argument whose property schema has `"x-gofr-result-descriptor":
+   true`.
+2. If a required descriptor argument is still missing after the model's call,
+   raise `ModelRetry(f"Tool {tool_name} requires descriptor argument
+   {arg_name}; pass it directly from the previous tool's response.")`. Do not
+   silently substitute full payloads.
+3. Keep descriptor metadata in `AgentDeps` only for traceability and retry
    hints, not as a hidden payload cache.
-5. Update prompt text in a small, targeted way.
-6. Preserve existing tests for inline tools and legacy scratchpad behaviour.
+4. Update prompt text in a small, targeted way: a one-paragraph rule that says
+   "forward descriptors verbatim".
+5. Preserve existing tests for inline tools and legacy scratchpad behaviour.
 
 Validation commands:
 
 ```
-./scripts/run_tests.sh -k "tool_factory or system_prompt or test_agent" -v
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh tests/unit/test_tool_factory.py tests/unit/test_system_prompt.py tests/unit/test_agent.py -v
 ./scripts/run_tests.sh -v
 ```
 
@@ -710,17 +848,26 @@ Implementation steps:
 1. Add tests as integration tests first. Keep fixtures deterministic.
 2. Use the same date/ticker workflow already used during manual validation:
    AAPL, 2026-04-01 to 2026-05-13.
-3. For context-leak checks, assert absence of representative OHLCV array keys or
-   payload-size markers in model-facing events, not just final text.
+3. Concrete context-leak check: for every `EventCollector` event captured
+   during the AAPL run, assert (a) no event payload contains a JSON array
+   longer than 32 entries, and (b) no event payload contains the literal
+   strings `"open"`, `"high"`, `"low"`, `"close"` together. The descriptor
+   `summary` is exempt because it is bounded.
 4. Keep failure assertions on structured error codes where possible.
-5. Run the manual fixture chat command after automated tests pass.
+5. Run the manual fixture chat command after automated tests pass. This is a
+   developer post-step and is not gated by CI; it requires `OPENROUTER_API_KEY`
+   or another live model.
 
 Validation commands:
 
 ```
-./scripts/run_tests.sh -k "agent_integration or hub_negative_paths" -v
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh tests/integration/test_agent_integration.py tests/integration/test_hub_negative_paths.py -v
 ./scripts/run_tests.sh -v
+```
+
+Developer post-step (not CI-gated):
+
+```
 uv run python scripts/fixture_chat.py --verbose --max-steps 40 --once "Using downstream tools only, calculate AAPL simple return, 30-day historical volatility, and max drawdown from 2026-04-01 to 2026-05-13. If an analytics tool requires bars, fetch OHLCV history first. Return compact JSON with ticker, from_date, to_date, simple_return, annualised_vol, max_drawdown_pct."
 ```
 
@@ -730,6 +877,62 @@ Phase 8 checkpoint:
 - Negative paths prove the design boundaries.
 - No large payload reaches model context.
 - Full suite and fixture chat pass.
+
+## Post-Implementation Review Remediation Gate
+
+Purpose: resolve issues found during implementation review before marking the
+plan complete against the spec. These items gate Phase 9 and final acceptance.
+
+Required fixes:
+
+1. Move registry/pool shutdown cancellation handling into production code.
+   Tests must not hide `asyncio.CancelledError` from `registry.shutdown()` or
+   `pool.stop()` with broad teardown-only suppression. `SessionPool.stop()` or
+   `ServiceRegistry.shutdown()` must close all available slots, clear registry
+   state, and tolerate MCP transport cancellation during normal shutdown.
+2. Keep `./scripts/run_tests.sh` target handling correct for both filesystem
+   paths and pytest node IDs. A command such as
+   `./scripts/run_tests.sh tests/unit/test_pool.py::TestSessionPoolStart::test_is_healthy_false_before_start -q`
+   must run the requested target, not the full unit and integration suites.
+3. Enforce hub memory bounds for stored metadata as well as payloads. The hub
+   currently sizes only `payload`; bounded fields such as `summary` and
+   `source_args` must either have explicit limits or be included in a total
+   stored-record size check so publishers cannot bypass `hub_max_payload_bytes`
+   with oversized advisory metadata.
+4. Correct the descriptor workflow test so its deterministic model matches the
+   user request. If the prompt asks for 30-day historical volatility, the test
+   model must call the analytics tool with `window=30`, and assertions must
+   verify the window-sensitive result rather than only checking that volatility
+   is non-null.
+
+Tests/checks to add or update:
+
+1. Unit coverage proving `SessionPool.stop()` and/or `ServiceRegistry.shutdown()`
+   handles transport `asyncio.CancelledError` without leaking it to callers and
+   still clears internal state.
+2. Runner coverage or a documented manual check proving pytest node IDs remain
+   targeted after the import-mode fix.
+3. Hub store tests proving oversized `summary` / `source_args` are rejected or
+   counted toward the configured limit, and that accepted descriptors remain
+   bounded and payload-free.
+4. End-to-end descriptor workflow assertions proving the requested analytics
+   window is the one actually used.
+
+Validation commands:
+
+```
+./scripts/run_tests.sh tests/unit/test_pool.py tests/unit/test_registry.py tests/unit/test_hub_store.py tests/integration/test_agent_integration.py -v
+./scripts/run_tests.sh tests/unit/test_pool.py::TestSessionPoolStart::test_is_healthy_false_before_start -q
+./scripts/run_tests.sh -v
+```
+
+Review remediation checkpoint:
+
+- Shutdown robustness is implemented in production code, not only test cleanup.
+- Targeted test invocations stay targeted for file paths and pytest node IDs.
+- Hub storage limits cover payload and advisory metadata.
+- The AAPL descriptor workflow test matches the requested 30-day calculation.
+- Full suite passes after the remediations.
 
 ## Phase 9 - Documentation And Cleanup
 
@@ -766,17 +969,20 @@ Implementation steps:
    to real future work.
 5. Run grep checks before final validation.
 
-Suggested grep checks:
+Suggested grep checks (review hits, do not blanket-reject):
 
 ```
-rg "localhost|127\.0\.0\.1|no-op|echo callback|startswith\(\"_\"\)|print\(" app tests docker docs services.yml.example
-rg "hub_callback_token|GOFR_FIXTURE|GOFR_AGENT_HUB" app tests docker docs services.yml.example
+rg -n 'url:\s*http://(localhost|127\.0\.0\.1)' services.yml.example docker docs
+rg -n 'startswith\(\"_\"\)' app tests
+rg -n 'no-op|echo callback' app tests docker docs
+rg -n '^\s*print\(' app docker/mcp_fixtures
+rg -n 'hub_callback_token|GOFR_FIXTURES_HUB_CALLBACK_TOKEN|GOFR_AGENT_HUB_' app tests docker docs services.yml.example
 ```
 
 Validation commands:
 
 ```
-./scripts/run_tests.sh -k code_quality -v
+./scripts/run_tests.sh --quality
 ./scripts/run_tests.sh -v
 ```
 
@@ -816,3 +1022,8 @@ Stop and ask before proceeding if any of these happen:
 6. A phase requires sending callback tokens in registration payloads.
 7. Full suite failures indicate unrelated breakage that would require broad
    refactoring outside this feature.
+
+When stopping under any of these, follow `A3` from `copilot-instructions.md`:
+write a short `docs/mcp_results_hub_<phase>_strategy.md` capturing the symptom,
+hypothesised cause, and the smallest experiment that would resolve the
+uncertainty, then ask the user before changing the spec or this plan.

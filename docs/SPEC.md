@@ -72,9 +72,9 @@ Downstream MCP servers are declared at startup. Configuration supports two mecha
 
 ```
 GOFR_AGENT_SERVICES=plot,iq,doc
-GOFR_AGENT_PLOT_URL=http://localhost:8050/mcp
-GOFR_AGENT_IQ_URL=http://localhost:8080/mcp
-GOFR_AGENT_DOC_URL=http://localhost:8040/mcp
+GOFR_AGENT_PLOT_URL=http://gofr-plot:8050/mcp
+GOFR_AGENT_IQ_URL=http://gofr-iq:8080/mcp
+GOFR_AGENT_DOC_URL=http://gofr-doc:8040/mcp
 # Optional JWT tokens per service
 GOFR_AGENT_PLOT_TOKEN=<jwt>
 GOFR_AGENT_IQ_TOKEN=<jwt>
@@ -88,19 +88,19 @@ GOFR_AGENT_IQ_TOKEN=<jwt>
 # services.yml
 services:
   - name: plot
-    url: http://localhost:8050/mcp
+    url: http://gofr-plot:8050/mcp
     token_env: GOFR_AGENT_PLOT_TOKEN   # env var holding the JWT
     description: "Graph rendering service"
     enabled: true
 
   - name: iq
-    url: http://localhost:8080/mcp
+    url: http://gofr-iq:8080/mcp
     token_env: GOFR_AGENT_IQ_TOKEN
     description: "Document Q&A / knowledge base"
     enabled: true
 
   - name: doc
-    url: http://localhost:8040/mcp
+    url: http://gofr-doc:8040/mcp
     token_env: GOFR_AGENT_DOC_TOKEN
     description: "Document ingestion and retrieval"
     enabled: true
@@ -113,9 +113,33 @@ services:
 | `name` | str | yes | Unique slug used as tool namespace prefix |
 | `url` | AnyHttpUrl | yes | Streamable HTTP endpoint |
 | `token_env` | str \| None | no | Env var name containing the Bearer token |
+| `hub_callback_token_env` | str \| None | no | Env var name containing the service callback token for the results hub |
 | `description` | str | no | Injected into system prompt for tool context |
 | `enabled` | bool | yes (default true) | Allows disabling without removing entry |
 | `timeout_s` | float | no (default 30) | Per-request HTTP timeout |
+
+Use Docker service names or other routable internal DNS names for service-to-
+service MCP traffic. `localhost`, `127.0.0.1`, and other loopback addresses are
+valid only for isolated local tests, not container-to-container deployment.
+
+### 3.3 Results hub descriptor handoff
+
+When `GOFR_AGENT_HUB_ENABLED=true`, `gofr-agent` also exposes a reserved
+results-hub protocol for downstream services:
+
+- Downstream services advertise support via `_register_results_hub` during
+  startup.
+- Producer services store large JSON payloads through `_store_result` and hand
+  descriptors back to the model instead of inline payloads.
+- Consumer services fetch authoritative payloads from `_get_result` or
+  `_describe_result` using those descriptors.
+- Services that need hub callbacks should provide `hub_callback_token_env`.
+  Callback tokens are never returned by `list_services` and are never sent in
+  registration payloads.
+
+Descriptors are internal tool-facing references, not end-user payloads. The
+model may see descriptor metadata, but it must not receive the large stored
+payload itself.
 
 ---
 
@@ -130,6 +154,11 @@ On startup, for each enabled service, `gofr-agent`:
    - Checks out an available session from the pool (via `asyncio.Semaphore`), calls `session.call_tool(tool_name, args)`, then returns the session to the pool.
    - Is namespaced as `{service_name}__{tool_name}` to avoid collisions.
 4. Registers all wrappers with the pydantic-ai `Agent`.
+
+Reserved hub protocol tools (`_register_results_hub`, `_store_result`,
+`_get_result`, `_describe_result`) are excluded from the model-facing tool
+catalogue. Other underscore-prefixed tools remain visible unless they are
+explicitly marked hidden.
 
 Tool discovery runs at startup for all services in the manifest. It also runs on-demand when a new MCP service is registered at runtime via the `register_service` MCP tool — no restart required. The `ServiceRegistry` keeps the pydantic-ai `Agent` updated after each registration by rebuilding the tool set.
 
@@ -213,7 +242,11 @@ Returns the currently connected downstream services and their available tools.
 
 **Input:** none
 
-**Output:** JSON list of `{ name, status, tools: [{ name, description }], error? }`
+**Output:** JSON list of
+`{ name, status, tools: [{ name, description }], supports_results_hub, can_publish_results, can_consume_results, result_types, registration_error?, error? }`
+
+Safe service metadata is returned; bearer tokens and callback credentials are
+never included.
 
 ### 5.5 `ping`
 

@@ -126,8 +126,25 @@ token grants every activity below.
 
 ### `list_services`
 - Args: none.
-- Returns: array of `{ name, status, tools: [{ name, description }] }`.
+- Returns: array of `{ name, status, tools: [{ name, description }], supports_results_hub, can_publish_results, can_consume_results, result_types, registration_error? }`.
 - Use for: showing the user which downstream capabilities exist.
+
+These fields are safe to display in the UI. Tokens and callback credentials are
+never returned by `list_services`.
+
+### Result descriptors in the UI
+
+When a downstream service supports the results hub, some tool calls will pass
+descriptors such as `{"kind":"gofr.result_ref", ...}` between services.
+Treat those descriptors as internal references only:
+
+- Do not render descriptor JSON as the user-facing answer unless you are
+  building a debug screen.
+- Do not expect descriptors to contain the large payload they refer to.
+- Do not try to resolve descriptors from the browser. Downstream services and
+  gofr-agent handle `_get_result` / `_describe_result` server-side.
+- Reasoning notifications intentionally omit raw payloads such as OHLCV arrays;
+  the descriptor is the only model-visible artifact.
 
 ### `ask` — the main tool
 - Args:
