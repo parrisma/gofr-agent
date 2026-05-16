@@ -67,13 +67,14 @@ uv sync
 cp services.yml.example services.yml
 $EDITOR services.yml
 
-# 4. Start the server (development — no auth)
+# 4. Start the server
 #    Any OpenAI-compatible provider works; OpenRouter example:
 GOFR_AGENT_LLM_MODEL=openai:deepseek/deepseek-v4-pro \
 OPENROUTER_API_KEY=sk-or-... \
-uv run python -m app.main_mcp --no-auth
+uv run python -m app.main_mcp --services-file services.yml
 
 # 5. Ask a question via the CLI
+GOFR_AGENT_TOKEN=dev-admin-token \
 uv run python -m app.cli.ask "What tools are available?"
 ```
 
@@ -83,21 +84,34 @@ The server listens on **port 8090** by default.
 
 ## Configuration
 
-All settings can be set via environment variables (prefix `GOFR_AGENT_`) or CLI
-flags.
+`GofrAgentConfig.from_env()` is the single configuration path. Settings use the
+`GOFR_AGENT_` prefix.
 
-| Env var | CLI flag | Default | Description |
-|---------|----------|---------|-------------|
-| `GOFR_AGENT_HOST` | `--host` | `0.0.0.0` | Bind host |
-| `GOFR_AGENT_MCP_PORT` | `--port` | `8090` | Bind port |
-| `GOFR_AGENT_JWT_SECRET` | `--jwt-secret` | — | JWT secret (required when auth enabled) |
-| `GOFR_AGENT_REQUIRE_AUTH` | `--no-auth` | `true` | Disable JWT auth for dev |
-| `GOFR_AGENT_SERVICES_FILE` | `--services-file` | `services.yml` | Path to services manifest |
-| `GOFR_AGENT_LLM_MODEL` | `--llm-model` | `openai:deepseek/deepseek-v4-pro` | pydantic-ai model string |
-| `GOFR_AGENT_SESSION_POOL_SIZE` | `--pool-size` | `3` | Concurrent connections per service |
-| `GOFR_AGENT_SESSION_TTL_MINUTES` | — | `60` | Session expiry |
-| `GOFR_AGENT_TOOL_RESULT_MAX_CHARS` | — | `4000` | Truncation limit for tool results |
-| `GOFR_AGENT_LOG_LEVEL` | `--log-level` | `INFO` | Logging level |
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `GOFR_AGENT_HOST` | `0.0.0.0` | Bind host |
+| `GOFR_AGENT_MCP_PORT` | `8090` | MCP server port |
+| `GOFR_AGENT_MCPO_PORT` | `8091` | OpenAI-compatible proxy port |
+| `GOFR_AGENT_SERVICES_FILE` | unset | Optional services manifest path |
+| `GOFR_AGENT_LLM_MODEL` | `openai:gpt-4o-mini` | Default pydantic-ai model |
+| `GOFR_AGENT_AGENT_TIMEOUT_SECONDS` | `120` | Wall-clock timeout for a single `ask` run |
+| `GOFR_AGENT_MAX_STEPS` | `10` | Default step limit when callers omit `max_steps` |
+| `GOFR_AGENT_MAX_STEPS_HARD_CAP` | `50` | Upper bound for caller-provided `max_steps` |
+| `GOFR_AGENT_MAX_QUESTION_CHARS` | `8000` | Input question size cap |
+| `GOFR_AGENT_MAX_CONTEXT_CHARS` | `16000` | Caller-supplied context size cap |
+| `GOFR_AGENT_MAX_EVENT_PAYLOAD_CHARS` | `4000` | Reasoning-event payload cap |
+| `GOFR_AGENT_MAX_RESPONSE_STEPS` | `200` | Final `steps` array cap |
+| `GOFR_AGENT_MAX_SESSIONS` | `1000` | Maximum in-memory sessions |
+| `GOFR_AGENT_MAX_MESSAGES_PER_SESSION` | `100` | Recent raw-message window before compaction |
+| `GOFR_AGENT_SESSION_TTL_MINUTES` | `60` | Session expiry window |
+| `GOFR_AGENT_SESSION_SWEEP_INTERVAL_SECONDS` | `60` | Session sweep cadence |
+| `GOFR_AGENT_TOOL_RESULT_MAX_CHARS` | `4000` | Downstream tool-result truncation limit |
+| `GOFR_AGENT_TOOL_RETRY_ATTEMPTS` | `2` | Retries for transient downstream tool failures |
+| `GOFR_AGENT_SESSION_POOL_SIZE` | `3` | Concurrent downstream sessions per service |
+| `GOFR_AGENT_DYNAMIC_REGISTRATION_ENABLED` | `false` | Enable runtime `register_service` |
+| `GOFR_AGENT_ALLOWED_SERVICE_HOSTS` | empty | Exact or wildcard allow-list for dynamic registration |
+| `GOFR_AGENT_ALLOWED_MODELS` | empty | Allow-list for `model_override` |
+| `GOFR_AGENT_LOG_LEVEL` | `INFO` | Logging level |
 
 ---
 
@@ -108,13 +122,15 @@ Copy `services.yml.example` to `services.yml` and fill in your services:
 ```yaml
 services:
   - name: rag
-    url: http://localhost:8100/mcp
+    url: http://gofr-rag:8100/mcp
     description: Internal knowledge base search
     token_env: RAG_MCP_TOKEN   # reads token from this env var
     enabled: true
 ```
 
-Services can also be registered at runtime via the `register_service` MCP tool.
+Services can also be registered at runtime via the `register_service` MCP tool
+when `GOFR_AGENT_DYNAMIC_REGISTRATION_ENABLED=true` and the target host matches
+`GOFR_AGENT_ALLOWED_SERVICE_HOSTS`.
 
 ---
 
@@ -139,18 +155,33 @@ gofr-agent exposes these tools over MCP:
 | `session_id` | `str` | auto-generated | Session ID for conversation continuity |
 | `context` | `str` | `null` | Extra context prepended to the question |
 | `max_steps` | `int` | `10` | Maximum tool-call iterations |
+| `model_override` | `str` | `null` | Optional allow-listed model override |
+
+`model_override` is accepted only when the caller has the
+`AGENT_MODEL_OVERRIDE` activity and the requested model appears in
+`GOFR_AGENT_ALLOWED_MODELS`.
 
 ### `ask` response
 
 ```json
 {
   "session_id": "abc-123",
+  "request_id": "req-123",
   "answer": "The answer is …",
-  "steps": [],
+  "steps": [
+    {"kind": "run_started", "sequence": 1},
+    {"kind": "tool_call", "sequence": 3, "service": "svc", "tool": "lookup"},
+    {"kind": "tool_result", "sequence": 4, "service": "svc", "tool": "lookup", "ok": true},
+    {"kind": "run_completed", "sequence": 5}
+  ],
   "model": "openai:gpt-4o-mini",
   "tokens_used": 142
 }
 ```
+
+`steps` is derived from the same live reasoning event stream sent over MCP
+logging notifications. Tool-using runs and summary-compaction runs produce
+non-empty `steps`.
 
 ---
 
@@ -163,6 +194,15 @@ uv run python -m app.cli.ask "What is the capital of France?"
 # Continue a conversation
 uv run python -m app.cli.ask --session abc-123 "What about Germany?"
 
+# Final answer only
+uv run python -m app.cli.ask --quiet "What is the capital of France?"
+
+# Verbose reasoning trace with tool arguments and summaries
+uv run python -m app.cli.ask --verbose "What is the capital of France?"
+
+# Emit JSON with both streamed events and the final response
+uv run python -m app.cli.ask --format json "What is the capital of France?"
+
 # Reset a session
 uv run python -m app.cli.ask --reset abc-123
 
@@ -170,26 +210,99 @@ uv run python -m app.cli.ask --reset abc-123
 uv run python -m app.cli.ask --url http://myserver:8090/mcp "Hello"
 ```
 
+Default CLI mode renders compact reasoning events when the server emits them,
+then prints the final answer. `--quiet` suppresses event output and metadata.
+`--verbose` expands the trace with thinking labels, tool arguments, and bounded
+tool-result summaries. `--format json` prints `{"events": [...], "response": {...}}`.
+The CLI consumes MCP `notifications/message` log events and filters for the
+`gofr-agent.reasoning` payloads.
+
+### Interactive fixture chat
+
+`scripts/fixture_chat.py` is a one-command launcher for manual testing
+against the bundled Docker Swarm fixture stack (`instruments`, `clients`,
+`trades`, `analytics`). It deploys the stack, starts a local gofr-agent
+MCP server wired against all four services, and opens a REPL.
+
+Requires `OPENROUTER_API_KEY` in the environment.
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+
+# Start the REPL with a higher tool-call ceiling for multi-service questions
+uv run python scripts/fixture_chat.py --max-steps 25
+
+# Start the REPL with a more descriptive reasoning trace
+uv run python scripts/fixture_chat.py --max-steps 25 --verbose
+```
+
+REPL commands: `:quit`, `:exit`, `:reset`. Use `--once "question"` for a
+one-shot run, `--keep-stack` to leave the fixtures running on exit, and
+`--skip-stack` if they are already deployed.
+
+#### Example: cross-service reasoning question
+
+Paste this at the `gofr>` prompt to exercise all four downstream
+services in a single turn:
+
+> For Meridian Capital, identify their largest equity holding by
+> current market value, then summarise their last 5 trades in that
+> instrument (date, side, quantity, price), compute the realised P&L
+> on those trades and the unrealised P&L on the remaining position
+> using the current spot, and finally compare the position's total
+> return against the instrument's 30-day analytics (return,
+> volatility, max drawdown). Return one paragraph with the client id,
+> instrument symbol, holding quantity, spot price, realised P&L,
+> unrealised P&L, total return, and a one-sentence comparison to the
+> 30-day analytics.
+
+A representative answer (exact figures depend on fixture seed data and
+the model in use):
+
+> **C001 (Meridian Capital)** — largest equity holding is **AAPL**
+> with **5,000 shares** at a spot price of **$189.45** (market value
+> $947,250, per `analytics__position_market_value`). Only two trades
+> exist on the blotter for this pair: **(1)** 2026-02-16, BUY 1,000 @
+> $182.10; **(2)** 2026-03-23, SELL 500 @ $191.30. The FIFO
+> **realised P&L** on the round-trip is **+$4,600.00** (per
+> `trades__get_realised_pnl`). Using the average buy price of $182.10
+> as the cost basis for the remaining 5,000 shares, the **unrealised
+> P&L** is **+$36,750.00** (5,000 × ($189.45 − $182.10)), bringing
+> the combined **total return** since inception to approximately
+> **+4.54%**. Over the same 30-day window (13 Apr – 13 May 2026),
+> AAPL posted a **−1.09%** simple return, **20.1%** annualised
+> volatility, and a **−5.29%** max drawdown (peak $189.42 on 28 Apr
+> to trough $179.39 on 11 May). While the instrument has drifted
+> modestly lower over the past month with a notable drawdown,
+> Meridian's position — acquired at a significantly lower cost basis
+> — remains comfortably in positive territory, outperforming the
+> 30-day benchmark return by roughly 560 basis points.
+
+The same question as a one-shot:
+
+```bash
+uv run python scripts/fixture_chat.py --max-steps 25 --once "For Meridian Capital, identify their largest equity holding by current market value, then summarise their last 5 trades in that instrument (date, side, quantity, price), compute the realised P&L on those trades and the unrealised P&L on the remaining position using the current spot, and finally compare the position's total return against the instrument's 30-day analytics (return, volatility, max drawdown). Return one paragraph with the client id, instrument symbol, holding quantity, spot price, realised P&L, unrealised P&L, total return, and a one-sentence comparison to the 30-day analytics."
+```
+
 ---
 
 ## Development
 
 ```bash
-# Install (editable) including gofr-common
+# Install dependencies
 uv sync
-uv pip install -e lib/gofr-common
 
 # Run quality gate (lint + type-check + security)
-uv run python -m pytest tests/code_quality/ -v
+./scripts/run_tests.sh --quality
 
 # Run unit tests
-uv run python -m pytest tests/unit/ -v
+./scripts/run_tests.sh --unit
 
 # Run integration tests (starts in-process mock MCP server)
-uv run python -m pytest tests/integration/ -v
+./scripts/run_tests.sh --integration
 
-# Run everything with coverage
-uv run python -m pytest --cov=app --cov-report=term-missing
+# Run the full suite
+./scripts/run_tests.sh
 
 # Lint / format
 uv run ruff check app tests --fix
@@ -211,14 +324,14 @@ as an OpenAI-compatible provider. Set the following environment variables:
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
-export OPENROUTER_MODEL=deepseek/deepseek-v4-pro   # default used by tests
+export OPENROUTER_MODEL=deepseek/deepseek-v4-pro   # optional override for live tests
 ```
 
 Run the live integration tests (requires API key):
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... \
-uv run python -m pytest tests/integration/test_openrouter.py -v -m openrouter
+./scripts/run_tests.sh tests/integration/test_openrouter.py -m openrouter
 ```
 
 ---

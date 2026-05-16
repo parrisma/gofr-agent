@@ -28,6 +28,8 @@ mcp = FastMCP("analytics-test-service")
 def historical_volatility(ticker: str, bars: list[dict], window: int = 20) -> dict:
     """Compute annualised close-to-close historical volatility (std of log returns * sqrt(252)).
 
+    `bars` must be supplied by the agent, typically from
+    `instruments__get_ohlcv_history`; this tool does not accept date ranges alone.
     Returns annualised_vol=None and observations=0 when fewer than window+1 bars are supplied.
     """
     _require_bearer()
@@ -58,6 +60,8 @@ def historical_volatility(ticker: str, bars: list[dict], window: int = 20) -> di
 def vwap(ticker: str, bars: list[dict]) -> dict:
     """Compute the volume-weighted average price over the supplied bars.
 
+    `bars` must be supplied by the agent, typically from
+    `instruments__get_ohlcv_history`.
     Uses (open + high + low + close) / 4 as the typical price per bar.
     """
     _require_bearer()
@@ -81,6 +85,8 @@ def vwap(ticker: str, bars: list[dict]) -> dict:
 def simple_return(ticker: str, bars: list[dict]) -> dict:
     """Compute the total simple price return between the first and last bar close.
 
+    `bars` must be supplied by the agent, typically from
+    `instruments__get_ohlcv_history`; this tool does not accept date ranges alone.
     return_pct = (to_price / from_price - 1) * 100
     """
     _require_bearer()
@@ -101,6 +107,8 @@ def simple_return(ticker: str, bars: list[dict]) -> dict:
 def max_drawdown(ticker: str, bars: list[dict]) -> dict:
     """Compute maximum peak-to-trough drawdown over the supplied bars.
 
+    `bars` must be supplied by the agent, typically from
+    `instruments__get_ohlcv_history`; this tool does not accept date ranges alone.
     Drawdown is expressed as a percentage (negative = loss).
     """
     _require_bearer()
@@ -139,6 +147,8 @@ def max_drawdown(ticker: str, bars: list[dict]) -> dict:
 def price_momentum(ticker: str, bars: list[dict], window: int = 20) -> dict:
     """Return a simple momentum signal: last close vs N-day moving average.
 
+    `bars` must be supplied by the agent, typically from
+    `instruments__get_ohlcv_history`; this tool does not accept date ranges alone.
     signal is "above_ma", "below_ma", or "insufficient_data".
     """
     _require_bearer()

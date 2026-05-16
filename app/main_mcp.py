@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
 import os
 import signal
 from pathlib import Path
@@ -23,12 +22,13 @@ from gofr_common.web import AuthHeaderMiddleware
 from app.agent.agent import GofrAgent
 from app.auth import get_auth_service
 from app.config import GofrAgentConfig
+from app.logger import get_logger
 from app.mcp_server.mcp_server import create_mcp_server
 from app.services import ServicesManifest
 from app.services.registry import ServiceRegistry
 from app.sessions.store import SessionStore
 
-logger = logging.getLogger(__name__)
+logger = get_logger("gofr-agent.main")
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -73,11 +73,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _run_server(args: argparse.Namespace) -> None:
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-
     config = GofrAgentConfig(
         session_pool_size=args.pool_size,
         llm_model=args.llm_model,
@@ -87,12 +82,16 @@ async def _run_server(args: argparse.Namespace) -> None:
     services_path = Path(args.services_file)
     if services_path.exists():
         manifest = ServicesManifest.from_yaml(services_path)
-        logger.info("Loaded %d service(s) from '%s'.", len(manifest.services), services_path)
+        logger.info(
+            "Loaded services manifest",
+            service_count=len(manifest.services),
+            services_file=str(services_path),
+        )
     else:
         manifest = ServicesManifest(services=[])
         logger.warning(
-            "Services file '%s' not found — starting with no downstream services.",
-            services_path,
+            "Services file not found; starting without downstream services",
+            services_file=str(services_path),
         )
 
     # Bootstrap
@@ -104,7 +103,12 @@ async def _run_server(args: argparse.Namespace) -> None:
     agent = GofrAgent(config, registry)
     agent.build()
 
-    session_store = SessionStore(ttl_minutes=config.session_ttl_minutes)
+    session_store = SessionStore(
+        ttl_minutes=config.session_ttl_minutes,
+        max_sessions=config.max_sessions,
+        max_messages_per_session=config.max_messages_per_session,
+        sweep_interval_seconds=config.session_sweep_interval_seconds,
+    )
     await session_store.start_ttl_sweep()
 
     mcp = create_mcp_server(config, registry, agent, session_store, auth_service)
@@ -114,13 +118,13 @@ async def _run_server(args: argparse.Namespace) -> None:
     shutdown_event = asyncio.Event()
 
     def _handle_signal(sig: int) -> None:
-        logger.info("Signal %d received — shutting down.", sig)
+        logger.info("Signal received; shutting down", signal=sig)
         shutdown_event.set()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _handle_signal, sig)
 
-    logger.info("Starting gofr-agent MCP server on %s:%d", args.host, args.port)
+    logger.info("Starting gofr-agent MCP server", host=args.host, port=args.port)
 
     server_config = uvicorn.Config(
         AuthHeaderMiddleware(mcp.streamable_http_app()),
@@ -133,7 +137,7 @@ async def _run_server(args: argparse.Namespace) -> None:
     serve_task = asyncio.create_task(server.serve())
     await shutdown_event.wait()
 
-    logger.info("Stopping registry…")
+    logger.info("Stopping registry")
     await registry.shutdown()
     server.should_exit = True
     await serve_task

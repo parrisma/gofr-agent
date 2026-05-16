@@ -33,8 +33,8 @@ User / LLM Client ×M (concurrent)
 │  └───────────────┬────────────────────────┘    │
 │                  │ one asyncio Task per ask()  │
 │  ┌───────────────▼────────────────────────┐    │
-│  │  pydantic-ai Agent  (shared, stateless)│    │  ← agent.run_stream() isolated per call
-│  │  agent.run_stream(messages=history)    │    │
+│  │  pydantic-ai Agent  (shared, stateless)│    │  ← Agent.iter(...) isolated per call
+│  │  Agent.iter(..., message_history=...) │    │
 │  └───────────────┬────────────────────────┘    │
 │                  │ concurrent tool calls       │
 │  ┌───────────────▼────────────────────────┐    │
@@ -57,7 +57,7 @@ User / LLM Client ×M (concurrent)
 |---|---|
 | HTTP / MCP server | uvicorn ASGI — handles M simultaneous connections |
 | `ask` handler | Each call runs as an independent `asyncio.Task`; no shared mutable state |
-| pydantic-ai Agent | Single shared `Agent` instance — `run_stream()` is stateless and re-entrant |
+| pydantic-ai Agent | Single shared `Agent` instance — `Agent.iter(...)` is stateless and re-entrant |
 | Session history | Per-session `asyncio.Lock` guards message-history reads/writes |
 | Downstream MCP calls | `SessionPool` per service — checked-out sessions serialise per connection; parallel calls draw from the pool concurrently |
 | Session TTL sweep | Background `asyncio.Task`, not a thread |
@@ -158,19 +158,23 @@ The primary interface.
 ```json
 {
   "session_id": "ses_abc123",
+  "request_id": "req_abc123",
   "answer": "...",
   "steps": [
-    { "step": 1, "type": "tool_call",   "tool": "plot__render_graph", "args": {...} },
-    { "step": 1, "type": "tool_result", "tool": "plot__render_graph", "result": "..." },
-    { "step": 2, "type": "tool_call",   "tool": "iq__search_docs",    "args": {...} },
-    { "step": 2, "type": "tool_result", "tool": "iq__search_docs",    "result": "..." }
+    { "kind": "run_started", "sequence": 1 },
+    { "kind": "tool_call", "sequence": 3, "service": "plot", "tool": "render_graph", "arguments": {...} },
+    { "kind": "tool_result", "sequence": 4, "service": "plot", "tool": "render_graph", "ok": true, "summary": "..." },
+    { "kind": "run_completed", "sequence": 8, "model": "openai:gpt-4o-mini", "tokens_used": 1234 }
   ],
   "model": "openai:gpt-4o-mini",
   "tokens_used": 1234
 }
 ```
 
-Each reasoning step is also emitted as an MCP `notifications/message` so that streaming-aware clients (e.g. the CLI tool) can display progress in real time without waiting for the final answer. See §7 for details.
+Each reasoning event is also emitted as an MCP `notifications/message` log
+message with logger `gofr-agent.reasoning`, so streaming-aware clients (e.g.
+the CLI tool) can display progress in real time without waiting for the final
+answer. The final `steps` array is derived from that same event stream.
 
 ### 5.2 `reset_session`
 
@@ -182,7 +186,7 @@ Clears conversation history for a session.
 |---|---|---|---|
 | `session_id` | str | yes | Session to clear |
 
-**Output:** `{ "status": "cleared", "session_id": "..." }`
+**Output:** `{ "status": "ok", "session_id": "..." }`
 
 ### 5.3 `register_service`
 
@@ -199,13 +203,17 @@ Registers a new downstream MCP service at runtime without restarting the agent. 
 
 **Output:** `{ "status": "registered", "name": "...", "tools_discovered": 5 }`
 
+Dynamic registration is allowed only when `dynamic_registration_enabled` is
+true and the target host matches `allowed_service_hosts`. Registration probes
+the target via tool discovery before returning success.
+
 ### 5.4 `list_services`
 
 Returns the currently connected downstream services and their available tools.
 
 **Input:** none
 
-**Output:** JSON list of `{ name, url, status, tools: [{ name, description }] }`
+**Output:** JSON list of `{ name, status, tools: [{ name, description }], error? }`
 
 ### 5.5 `ping`
 
@@ -223,31 +231,46 @@ Re-runs tool discovery against all registered services and rebuilds the agent to
 
 Each `ask` call either creates a new session (when `session_id` is omitted or unknown) or continues an existing one. A new `session_id` is returned in every response.
 
-Sessions are stored in-process in a `SessionStore` (a dict keyed by `session_id`). Each session holds:
+Sessions are stored in-process behind a small backend abstraction. The default
+backend is in-memory. Each session holds:
 
 ```python
 @dataclass
 class Session:
     session_id: str
-    messages: list[ModelMessage]   # pydantic-ai message history
-    lock: asyncio.Lock             # guards concurrent access to this session
+  messages: list[ModelMessage]   # recent raw pydantic-ai message history
+  summary: str                   # rolling derived summary of older context
+  lock: asyncio.Lock             # guards concurrent access to this session
     created_at: datetime
+  updated_at: datetime
     last_active: datetime
 ```
 
-`messages` is the pydantic-ai `MessageHistory` object passed to `Agent.run_stream(..., message_history=...)` on subsequent turns, giving the LLM full context of the prior conversation.
+`messages` remains the recent raw window passed to `Agent.iter(...,
+message_history=...)` on subsequent turns. Older history is compacted into
+`summary`, which is injected back into the prompt as derived context rather
+than as a trusted system instruction.
 
 Each `ask` call acquires the session's `lock` before reading or writing `messages`. This prevents two concurrent requests on the same `session_id` from corrupting history. The lock is held only for the duration of the history read (before the agent run) and the history write (after), not for the entire LLM reasoning loop, so it does not block unrelated sessions.
 
 ### 6.2 Session TTL
 
-Sessions expire after `GOFR_AGENT_SESSION_TTL_MINUTES` of inactivity (default: 60). A background task sweeps expired sessions every minute.
+Sessions expire after `GOFR_AGENT_SESSION_TTL_MINUTES` of inactivity (default:
+60). A background task sweeps expired sessions every
+`GOFR_AGENT_SESSION_SWEEP_INTERVAL_SECONDS` seconds.
 
-### 6.3 Reset
+### 6.3 Session bounds and compaction
+
+Session growth is bounded by `GOFR_AGENT_MAX_SESSIONS` and
+`GOFR_AGENT_MAX_MESSAGES_PER_SESSION`. When the recent raw window exceeds the
+message cap, older messages are compacted into `summary` and a
+`summary_update` reasoning event is emitted.
+
+### 6.4 Reset
 
 `reset_session` (MCP tool §5.2) clears the message history for a session. The `session_id` is preserved but the conversation starts fresh.
 
-### 6.4 Persistence
+### 6.5 Persistence
 
 v1 sessions are in-memory only. A restart loses all session history. Disk persistence is a future consideration.
 
@@ -257,33 +280,48 @@ v1 sessions are in-memory only. A restart loses all session history. Disk persis
 
 ### 7.1 Mechanism
 
-`agent.run_stream()` is used instead of `agent.run()`. As each reasoning step completes, the agent emits an MCP `notifications/message` notification containing a JSON step object:
+`Agent.iter(...)` is used instead of the older text-only execution path. While
+the run is in progress, gofr-agent emits MCP `notifications/message` log
+messages whose `data` field is the reasoning event payload.
 
 ```json
 {
-  "type": "step",
-  "step": 2,
+  "request_id": "req_abc123",
+  "session_id": "ses_abc123",
+  "event_id": "evt_1",
+  "sequence": 3,
   "kind": "tool_call",
-  "tool": "iq__search_docs",
-  "args": { "query": "Q3 revenue" }
+  "service": "iq",
+  "tool": "search_docs",
+  "arguments": { "query": "Q3 revenue" },
+  "timestamp": "2026-05-15T20:00:00Z"
 }
 ```
 
 ```json
 {
-  "type": "step",
-  "step": 2,
+  "request_id": "req_abc123",
+  "session_id": "ses_abc123",
+  "event_id": "evt_2",
+  "sequence": 4,
   "kind": "tool_result",
-  "tool": "iq__search_docs",
-  "result": "Revenue was $42M (see http://gofr-iq/results/abc123)"
+  "service": "iq",
+  "tool": "search_docs",
+  "ok": true,
+  "summary": "Revenue was $42M",
+  "attempt": 1,
+  "timestamp": "2026-05-15T20:00:01Z"
 }
 ```
 
-The final message in the stream is the complete answer JSON (§5.1).
+The final response JSON (§5.1) reuses the same event sequence for its `steps`
+array, excluding `text_delta` events.
 
 ### 7.2 Parallel tool calls
 
-pydantic-ai parallel tool dispatch is **enabled**. When the LLM issues multiple tool calls in one step, they are awaited concurrently. Each individual tool call/result pair is still emitted as a separate notification so the client sees granular progress.
+Tool calls are surfaced as individual `tool_call`, `tool_retry`, and
+`tool_result` events. `summary_update` events are emitted when long sessions are
+compacted.
 
 ### 7.3 Tool result size limit
 
@@ -294,22 +332,28 @@ This is appropriate because the downstream MCPs are session-based and return lin
 
 ### 7.4 CLI tool
 
-A command-line tool (`scripts/ask.py` or `python -m app.cli`) connects to the agent's MCP endpoint, issues an `ask` call, and renders the streaming notifications to the terminal in real time:
+A command-line tool (`python -m app.cli.ask`) connects to the agent's MCP
+endpoint, issues an `ask` call, and renders the streamed reasoning events in
+real time:
 
 ```
-$ gofr-agent ask "Plot revenue for Q1-Q4 and summarise the trend"
+
+$ uv run python -m app.cli.ask --token dev-admin-token "Plot revenue for Q1-Q4 and summarise the trend"
 
 [session: ses_abc123]
-  step 1 → plot__render_graph (title="Revenue Q1-Q4", ...)
-  step 1 ← http://gofr-plot/download/guid123
-  step 2 → iq__search_docs (query="revenue trend Q1-Q4")
-  step 2 ← Revenue grew 18% YoY driven by …
+  - Thinking
+  - Tool: plot.render_graph
+  - Result: plot.render_graph [ok]
+  - Tool: iq.search_docs
+  - Result: iq.search_docs [ok]
 
 Answer: Revenue grew 18% year-on-year. A chart has been rendered at
         http://gofr-plot/download/guid123. The strongest quarter was Q3 …
 ```
 
-The CLI supports `--session SESSION_ID` to continue a prior conversation and `--reset SESSION_ID` to clear one.
+The CLI supports `--session SESSION_ID` to continue a prior conversation,
+`--reset SESSION_ID` to clear one, `--quiet` for answer-only output, and
+`--format json` for `{ "events": [...], "response": {...} }`.
 
 ---
 

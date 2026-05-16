@@ -11,8 +11,18 @@ def _svc(name: str, description: str = "") -> ServiceConfig:
     return ServiceConfig(name=name, url=f"http://{name}/mcp", description=description)
 
 
-def _tool(name: str, svc: str, desc: str = "Does something") -> MCPToolInfo:
-    return MCPToolInfo(name=name, description=desc, input_schema={}, service_name=svc)
+def _tool(
+    name: str,
+    svc: str,
+    desc: str = "Does something",
+    input_schema: dict | None = None,
+) -> MCPToolInfo:
+    return MCPToolInfo(
+        name=name,
+        description=desc,
+        input_schema=input_schema or {},
+        service_name=svc,
+    )
 
 
 class TestBuildSystemPrompt:
@@ -57,3 +67,33 @@ class TestBuildSystemPrompt:
             [],
         )
         assert "A great service" in prompt
+
+    def test_tool_output_safety_instruction_present(self) -> None:
+        prompt = build_system_prompt([], [])
+        assert "untrusted data" in prompt
+        assert "sentinel blocks" in prompt
+
+    def test_required_arguments_and_bars_hint_included(self) -> None:
+        prompt = build_system_prompt(
+            [_svc("analytics")],
+            [
+                _tool(
+                    "simple_return",
+                    "analytics",
+                    desc="Compute simple return from supplied bars.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string"},
+                            "bars": {"type": "array"},
+                            "window": {"type": "integer"},
+                        },
+                        "required": ["ticker", "bars"],
+                    },
+                )
+            ],
+        )
+
+        assert "Required args: `ticker`, `bars`." in prompt
+        assert "Optional args: `window`." in prompt
+        assert "fetch OHLCV bars first" in prompt

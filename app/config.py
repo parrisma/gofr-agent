@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class GofrAgentConfig(BaseModel):
@@ -33,10 +33,23 @@ class GofrAgentConfig(BaseModel):
     services_file: Path | None = None
 
     # Agent behaviour
+    agent_timeout_seconds: int = 120
     max_steps: int = 10
+    max_steps_hard_cap: int = 50
+    max_question_chars: int = 8000
+    max_context_chars: int = 16000
+    max_event_payload_chars: int = 4000
+    max_response_steps: int = 200
+    max_sessions: int = 1000
+    max_messages_per_session: int = 100
     session_ttl_minutes: int = 60
+    session_sweep_interval_seconds: int = 60
     tool_result_max_chars: int = 4000
+    tool_retry_attempts: int = 2
     session_pool_size: int = 3
+    dynamic_registration_enabled: bool = False
+    allowed_service_hosts: list[str] = Field(default_factory=list)
+    allowed_models: list[str] = Field(default_factory=list)
 
     # Logging
     log_level: str = "INFO"
@@ -53,17 +66,49 @@ class GofrAgentConfig(BaseModel):
         def _get(name: str, default: str = "") -> str:
             return e.get(f"{prefix}_{name}", default)
 
+        def _get_bool(name: str, default: bool) -> bool:
+            raw = _get(name)
+            if raw == "":
+                return default
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+        def _get_list(name: str) -> list[str]:
+            raw = _get(name)
+            if raw == "":
+                return []
+            return [part.strip() for part in raw.split(",") if part.strip()]
+
+        services_file = _get("SERVICES_FILE")
+
         return cls(
             mcp_port=int(_get("MCP_PORT", "8090")),
             mcpo_port=int(_get("MCPO_PORT", "8091")),
             host=_get("HOST", "0.0.0.0"),  # nosec B104
             llm_model=_get("LLM_MODEL", "openai:gpt-4o-mini"),
             openrouter_api_key=_get("OPENROUTER_API_KEY") or None,
-            services_file=Path(_get("SERVICES_FILE")) if _get("SERVICES_FILE") else None,
+            services_file=Path(services_file) if services_file else None,
+            agent_timeout_seconds=int(_get("AGENT_TIMEOUT_SECONDS", "120")),
             max_steps=int(_get("MAX_STEPS", "10")),
+            max_steps_hard_cap=int(_get("MAX_STEPS_HARD_CAP", "50")),
+            max_question_chars=int(_get("MAX_QUESTION_CHARS", "8000")),
+            max_context_chars=int(_get("MAX_CONTEXT_CHARS", "16000")),
+            max_event_payload_chars=int(_get("MAX_EVENT_PAYLOAD_CHARS", "4000")),
+            max_response_steps=int(_get("MAX_RESPONSE_STEPS", "200")),
+            max_sessions=int(_get("MAX_SESSIONS", "1000")),
+            max_messages_per_session=int(_get("MAX_MESSAGES_PER_SESSION", "100")),
             session_ttl_minutes=int(_get("SESSION_TTL_MINUTES", "60")),
+            session_sweep_interval_seconds=int(
+                _get("SESSION_SWEEP_INTERVAL_SECONDS", "60")
+            ),
             tool_result_max_chars=int(_get("TOOL_RESULT_MAX_CHARS", "4000")),
+            tool_retry_attempts=int(_get("TOOL_RETRY_ATTEMPTS", "2")),
             session_pool_size=int(_get("SESSION_POOL_SIZE", "3")),
+            dynamic_registration_enabled=_get_bool(
+                "DYNAMIC_REGISTRATION_ENABLED",
+                False,
+            ),
+            allowed_service_hosts=_get_list("ALLOWED_SERVICE_HOSTS"),
+            allowed_models=_get_list("ALLOWED_MODELS"),
             log_level=_get("LOG_LEVEL", "INFO"),
         )
 

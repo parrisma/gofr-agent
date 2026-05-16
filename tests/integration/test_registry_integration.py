@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from app.config import GofrAgentConfig
+from app.exceptions import ServiceRegistrationPolicyError
 from app.services import ServiceConfig, ServicesManifest
 from app.services.registry import ServiceRegistry
 
@@ -68,3 +71,32 @@ class TestRegistryIntegration:
             assert registry.get_pool("nonexistent") is None
         finally:
             await registry.shutdown()
+
+    async def test_dynamic_registration_discovers_tools_when_host_allowed(
+        self, mock_mcp_url: str
+    ) -> None:
+        registry = ServiceRegistry(
+            GofrAgentConfig(
+                dynamic_registration_enabled=True,
+                allowed_service_hosts=["127.0.0.1"],
+            )
+        )
+        try:
+            tools = await registry.register_service(
+                ServiceConfig(name="mock", url=mock_mcp_url, description="Mock test service")
+            )
+            assert {tool.name for tool in tools} >= {"echo", "add"}
+        finally:
+            await registry.shutdown()
+
+    async def test_dynamic_registration_rejects_disallowed_host(self) -> None:
+        registry = ServiceRegistry(
+            GofrAgentConfig(
+                dynamic_registration_enabled=True,
+                allowed_service_hosts=["gofr-*"],
+            )
+        )
+        with pytest.raises(ServiceRegistrationPolicyError, match="allowed_service_hosts"):
+            await registry.register_service(
+                ServiceConfig(name="mock", url="http://127.0.0.1:8199/mcp")
+            )

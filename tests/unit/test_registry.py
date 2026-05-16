@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from app.config import GofrAgentConfig
+from app.exceptions import ServiceRegistrationPolicyError
 from app.services import ServiceConfig, ServicesManifest
 from app.services.discovery import MCPToolInfo
 from app.services.pool import SessionPool
@@ -116,7 +119,9 @@ class TestLoadManifest:
 
 class TestRegisterService:
     async def test_adds_to_registry(self) -> None:
-        registry = ServiceRegistry(_make_config())
+        registry = ServiceRegistry(
+            _make_config(dynamic_registration_enabled=True, allowed_service_hosts=["*"])
+        )
         svc = _make_svc("new")
         tools = _make_tools("alpha", service="new")
         _patch_registry(registry, svc, tools)
@@ -126,7 +131,9 @@ class TestRegisterService:
         assert "new" in registry._pools
 
     async def test_replaces_existing(self) -> None:
-        registry = ServiceRegistry(_make_config())
+        registry = ServiceRegistry(
+            _make_config(dynamic_registration_enabled=True, allowed_service_hosts=["*"])
+        )
         svc = _make_svc("svc")
 
         old_pool = MagicMock(spec=SessionPool)
@@ -138,6 +145,65 @@ class TestRegisterService:
 
         await registry.register_service(svc)
         old_pool.stop.assert_awaited_once()
+
+    async def test_disabled_dynamic_registration_fails_early(self) -> None:
+        registry = ServiceRegistry(_make_config(dynamic_registration_enabled=False))
+
+        with pytest.raises(ServiceRegistrationPolicyError, match="disabled"):
+            await registry.register_service(_make_svc("new"))
+
+    async def test_disallowed_host_fails_before_pool_creation(self) -> None:
+        registry = ServiceRegistry(
+            _make_config(dynamic_registration_enabled=True, allowed_service_hosts=["gofr-*"])
+        )
+
+        with pytest.raises(ServiceRegistrationPolicyError, match="allowed_service_hosts"):
+            await registry.register_service(_make_svc("blocked", "http://blocked-host/mcp"))
+
+    async def test_allowed_host_probes_discovery_before_success(self, monkeypatch) -> None:
+        registry = ServiceRegistry(
+            _make_config(dynamic_registration_enabled=True, allowed_service_hosts=["gofr-*"])
+        )
+        svc = _make_svc("mock", "http://gofr-service/mcp")
+        tools = _make_tools("alpha", service="mock")
+        pool = MagicMock(spec=SessionPool)
+        pool.start = AsyncMock()
+        pool.stop = AsyncMock()
+        pool.is_healthy = True
+
+        session_pool_ctor = MagicMock(return_value=pool)
+        monkeypatch.setattr("app.services.registry.SessionPool", session_pool_ctor)
+        discover = AsyncMock(return_value=tools)
+        monkeypatch.setattr("app.services.registry.discover_tools", discover)
+
+        result = await registry.register_service(svc)
+
+        assert result == tools
+        session_pool_ctor.assert_called_once()
+        pool.start.assert_awaited_once()
+        discover.assert_awaited_once_with(pool, svc)
+
+    async def test_failed_registration_records_failed_service_state(self, monkeypatch) -> None:
+        registry = ServiceRegistry(
+            _make_config(dynamic_registration_enabled=True, allowed_service_hosts=["gofr-*"])
+        )
+        svc = _make_svc("mock", "http://gofr-service/mcp")
+        pool = MagicMock(spec=SessionPool)
+        pool.start = AsyncMock()
+        pool.stop = AsyncMock()
+        pool.is_healthy = False
+
+        monkeypatch.setattr("app.services.registry.SessionPool", MagicMock(return_value=pool))
+        monkeypatch.setattr(
+            "app.services.registry.discover_tools",
+            AsyncMock(side_effect=RuntimeError("probe failed")),
+        )
+
+        with pytest.raises(RuntimeError, match="probe failed"):
+            await registry.register_service(svc)
+
+        assert registry.service_status("mock") == "failed"
+        assert registry.service_error("mock") == "probe failed"
 
 
 class TestAllTools:

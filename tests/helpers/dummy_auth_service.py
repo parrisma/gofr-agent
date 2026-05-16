@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.auth.permissions import (
     AGENT_ASK,
     AGENT_LIST_SERVICES,
+    AGENT_MODEL_OVERRIDE,
     AGENT_PING,
     AGENT_REFRESH_SERVICES,
     AGENT_REGISTER_SERVICE,
@@ -19,6 +20,7 @@ _ALL = ",".join([
     AGENT_PING,
     AGENT_LIST_SERVICES,
     AGENT_ASK,
+    AGENT_MODEL_OVERRIDE,
     AGENT_RESET_SESSION,
     AGENT_REGISTER_SERVICE,
     AGENT_REFRESH_SERVICES,

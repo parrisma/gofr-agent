@@ -6,6 +6,8 @@ from app.exceptions import (
     ConfigurationError,
     GofrAgentError,
     ServiceConnectionError,
+    ServiceRegistrationPolicyError,
+    SessionCapacityError,
     SessionNotFoundError,
     ToolDiscoveryError,
     ToolResultTruncatedWarning,
@@ -19,11 +21,17 @@ class TestExceptionHierarchy:
     def test_service_connection_error_is_base(self) -> None:
         assert issubclass(ServiceConnectionError, GofrAgentError)
 
+    def test_service_registration_policy_is_base(self) -> None:
+        assert issubclass(ServiceRegistrationPolicyError, GofrAgentError)
+
     def test_tool_discovery_error_is_base(self) -> None:
         assert issubclass(ToolDiscoveryError, GofrAgentError)
 
     def test_session_not_found_is_base(self) -> None:
         assert issubclass(SessionNotFoundError, GofrAgentError)
+
+    def test_session_capacity_is_base(self) -> None:
+        assert issubclass(SessionCapacityError, GofrAgentError)
 
     def test_truncated_warning_is_base(self) -> None:
         assert issubclass(ToolResultTruncatedWarning, GofrAgentError)
@@ -41,6 +49,10 @@ class TestExceptionInstantiation:
         exc = ServiceConnectionError("could not connect to http://x")
         assert "http://x" in str(exc)
 
+    def test_service_registration_policy_with_message(self) -> None:
+        exc = ServiceRegistrationPolicyError("host blocked")
+        assert "host blocked" in str(exc)
+
     def test_tool_discovery_with_message(self) -> None:
         exc = ToolDiscoveryError("list_tools failed")
         assert str(exc) == "list_tools failed"
@@ -48,6 +60,10 @@ class TestExceptionInstantiation:
     def test_session_not_found_with_message(self) -> None:
         exc = SessionNotFoundError("unknown-session-id")
         assert "unknown-session-id" in str(exc)
+
+    def test_session_capacity_with_message(self) -> None:
+        exc = SessionCapacityError("max sessions reached")
+        assert "max sessions" in str(exc)
 
     def test_configuration_error_with_message(self) -> None:
         exc = ConfigurationError("jwt_secret required when require_auth=True")

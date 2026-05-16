@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -20,9 +19,11 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from app.exceptions import AuthTokenInvalidError, ServiceConnectionError
+from app.logger import get_logger
+from app.request_context import request_log_fields
 from app.services import ServiceConfig
 
-logger = logging.getLogger(__name__)
+logger = get_logger("gofr-agent.pool")
 
 _RECONNECT_DELAYS = [1, 2, 4, 8, 16, 32, 60]  # seconds, capped at 60
 
@@ -140,7 +141,10 @@ class SessionPool:
                     self._transport_cms[index] = transport_cm
                     self._session_cms[index] = session_cm
                 logger.debug(
-                    "Slot %d opened for service '%s'", index, self._service.name
+                    "Pool slot opened",
+                    slot=index,
+                    service=self._service.name,
+                    **request_log_fields(),
                 )
             except Exception:
                 with contextlib.suppress(Exception):
@@ -150,10 +154,11 @@ class SessionPool:
             with contextlib.suppress(Exception):
                 await transport_cm.__aexit__(None, None, None)
             logger.warning(
-                "Failed to open slot %d for service '%s': %s",
-                index,
-                self._service.name,
-                exc,
+                "Failed to open pool slot",
+                slot=index,
+                service=self._service.name,
+                error=str(exc),
+                **request_log_fields(),
             )
             async with self._lock:
                 self._slots[index] = None
@@ -170,18 +175,25 @@ class SessionPool:
             if self._stopped:
                 return
             logger.info(
-                "Reconnecting slot %d for service '%s'...", index, self._service.name
+                "Reconnecting pool slot",
+                slot=index,
+                service=self._service.name,
+                **request_log_fields(),
             )
             await self._open_slot(index)
             if self._slots[index] is not None:
                 logger.info(
-                    "Slot %d reconnected for service '%s'", index, self._service.name
+                    "Pool slot reconnected",
+                    slot=index,
+                    service=self._service.name,
+                    **request_log_fields(),
                 )
                 return
         logger.error(
-            "Slot %d for service '%s' failed permanently after back-off exhausted.",
-            index,
-            self._service.name,
+            "Pool slot failed permanently after reconnect backoff",
+            slot=index,
+            service=self._service.name,
+            **request_log_fields(),
         )
 
     # ------------------------------------------------------------------

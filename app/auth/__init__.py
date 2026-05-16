@@ -11,6 +11,7 @@ from app.auth.auth_service import AuthService, FailClosedAuthService, get_auth_s
 from app.auth.permissions import (
     AGENT_ASK,
     AGENT_LIST_SERVICES,
+    AGENT_MODEL_OVERRIDE,
     AGENT_PING,
     AGENT_REFRESH_SERVICES,
     AGENT_REGISTER_SERVICE,
@@ -31,6 +32,7 @@ __all__ = [
     # permissions
     "AGENT_ASK",
     "AGENT_LIST_SERVICES",
+    "AGENT_MODEL_OVERRIDE",
     "AGENT_PING",
     "AGENT_REFRESH_SERVICES",
     "AGENT_REGISTER_SERVICE",

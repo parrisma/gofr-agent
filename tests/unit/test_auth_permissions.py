@@ -8,6 +8,7 @@ from app.auth.auth_service import FailClosedAuthService
 from app.auth.permissions import (
     AGENT_ASK,
     AGENT_LIST_SERVICES,
+    AGENT_MODEL_OVERRIDE,
     AGENT_PING,
     AGENT_REFRESH_SERVICES,
     AGENT_REGISTER_SERVICE,
@@ -28,6 +29,7 @@ class TestActivityConstants:
             AGENT_PING,
             AGENT_LIST_SERVICES,
             AGENT_ASK,
+            AGENT_MODEL_OVERRIDE,
             AGENT_RESET_SESSION,
             AGENT_REGISTER_SERVICE,
             AGENT_REFRESH_SERVICES,
@@ -38,6 +40,7 @@ class TestActivityConstants:
         assert AGENT_PING == "GoFRAgentPing"
         assert AGENT_LIST_SERVICES == "GoFRAgentListServices"
         assert AGENT_ASK == "GoFRAgentAsk"
+        assert AGENT_MODEL_OVERRIDE == "GoFRAgentModelOverride"
         assert AGENT_RESET_SESSION == "GoFRAgentResetSession"
         assert AGENT_REGISTER_SERVICE == "GoFRAgentRegisterService"
         assert AGENT_REFRESH_SERVICES == "GoFRAgentRefreshServices"

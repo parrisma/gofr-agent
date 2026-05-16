@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.exceptions import SessionNotFoundError
+from app.exceptions import SessionCapacityError, SessionNotFoundError
 from app.sessions.store import Session, SessionStore
 
 
@@ -56,6 +56,17 @@ class TestClear:
         with pytest.raises(SessionNotFoundError):
             await store.clear("ghost-session")
 
+    async def test_clear_empties_summary(self) -> None:
+        store = SessionStore()
+        sess = await store.get_or_create(None)
+        sess.messages.append("goal: keep compatibility")
+        sess.summary = "Goals:\n- keep compatibility"
+
+        await store.clear(sess.session_id)
+
+        assert sess.messages == []
+        assert sess.summary == ""
+
 
 class TestDelete:
     async def test_delete_removes_session(self) -> None:
@@ -102,3 +113,43 @@ class TestSweepExpired:
         assert removed == 1
         assert old.session_id not in store._sessions
         assert new.session_id in store._sessions
+
+
+class TestCapacityAndSummary:
+    async def test_session_count_cap_rejects_new_sessions_clearly(self) -> None:
+        store = SessionStore(max_sessions=1)
+        existing = await store.get_or_create("existing")
+
+        assert await store.get_or_create("existing") is existing
+        with pytest.raises(SessionCapacityError, match="max_sessions"):
+            await store.get_or_create("next-session")
+
+    async def test_message_cap_compacts_old_messages_into_summary(self) -> None:
+        store = SessionStore(max_messages_per_session=2)
+        sess = await store.get_or_create(None)
+
+        summary = sess.append_messages(
+            [
+                "goal: ship reasoning stream",
+                "constraint: keep final answer compatibility",
+                "decision: use MCP notifications",
+            ]
+        )
+
+        assert summary is not None
+        assert sess.messages == [
+            "constraint: keep final answer compatibility",
+            "decision: use MCP notifications",
+        ]
+        assert "Goals:" in sess.summary
+        assert "goal: ship reasoning stream" in sess.summary
+
+    async def test_recent_window_remains_intact_after_compaction(self) -> None:
+        store = SessionStore(max_messages_per_session=2)
+        sess = await store.get_or_create(None)
+
+        sess.append_messages(["m1", "m2", "m3", "m4"])
+
+        assert sess.messages == ["m3", "m4"]
+        assert "m1" in sess.summary
+        assert "m2" in sess.summary

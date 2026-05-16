@@ -5,6 +5,7 @@ from __future__ import annotations
 from app.auth import (
     AGENT_ASK,
     AGENT_LIST_SERVICES,
+    AGENT_MODEL_OVERRIDE,
     AGENT_PING,
     AGENT_REFRESH_SERVICES,
     AGENT_REGISTER_SERVICE,
@@ -36,12 +37,13 @@ class TestAuthPublicSurface:
         assert AGENT_PING == "GoFRAgentPing"
         assert AGENT_LIST_SERVICES == "GoFRAgentListServices"
         assert AGENT_ASK == "GoFRAgentAsk"
+        assert AGENT_MODEL_OVERRIDE == "GoFRAgentModelOverride"
         assert AGENT_RESET_SESSION == "GoFRAgentResetSession"
         assert AGENT_REGISTER_SERVICE == "GoFRAgentRegisterService"
         assert AGENT_REFRESH_SERVICES == "GoFRAgentRefreshServices"
 
     def test_all_activities_list(self) -> None:
-        assert len(ALL_ACTIVITIES) == 6
+        assert len(ALL_ACTIVITIES) == 7
 
     def test_helpers_callable(self) -> None:
         assert callable(downstream_activity)

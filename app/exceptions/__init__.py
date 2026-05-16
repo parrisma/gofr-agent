@@ -5,6 +5,7 @@ Hierarchy:
     ├── ServiceConnectionError  — pool / connection failures
     ├── ToolDiscoveryError      — failed tool list from downstream
     ├── SessionNotFoundError    — unknown session_id supplied by caller
+    ├── SessionCapacityError    — session limit reached
     ├── ToolResultTruncatedWarning — informational; not raised to callers
     └── ConfigurationError      — invalid startup configuration
 """
@@ -24,6 +25,14 @@ class ToolDiscoveryError(GofrAgentError):
 
 class SessionNotFoundError(GofrAgentError):
     """Raised when a caller supplies an unknown session_id."""
+
+
+class SessionCapacityError(GofrAgentError):
+    """Raised when creating a new session would exceed the session limit."""
+
+
+class ServiceRegistrationPolicyError(GofrAgentError):
+    """Raised when dynamic service registration violates policy."""
 
 
 class ToolResultTruncatedWarning(GofrAgentError):
@@ -55,3 +64,35 @@ class AuthTokenInvalidError(AuthServiceError):
 
 class AuthServiceUnavailableError(AuthServiceError):
     """The auth backend cannot answer authorization questions."""
+
+
+class DownstreamToolError(GofrAgentError):
+    """Structured error for a failed downstream tool call."""
+
+    def __init__(
+        self,
+        *,
+        service: str,
+        tool: str,
+        message: str,
+        transient: bool,
+        fatal: bool,
+        recovery_hint: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.service = service
+        self.tool = tool
+        self.message = message
+        self.transient = transient
+        self.fatal = fatal
+        self.recovery_hint = recovery_hint
+
+    def as_payload(self) -> dict[str, str | bool | None]:
+        return {
+            "service": self.service,
+            "tool": self.tool,
+            "message": self.message,
+            "transient": self.transient,
+            "fatal": self.fatal,
+            "recovery_hint": self.recovery_hint,
+        }

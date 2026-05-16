@@ -140,6 +140,30 @@ class TestMCPServerIntegration:
         assert "answer" in data
         assert "session_id" in data
 
+    async def test_ask_emits_reasoning_notifications(self, agent_server: str) -> None:
+        import json
+
+        notifications: list[dict[str, object]] = []
+
+        async def _capture_log(params) -> None:  # type: ignore[no-untyped-def]
+            if isinstance(params.data, dict):
+                notifications.append(params.data)
+
+        async with (
+            streamablehttp_client(agent_server, headers=_HEADERS) as (read, write, _),
+            ClientSession(read, write, logging_callback=_capture_log) as client,
+        ):
+            await client.initialize()
+            result = await client.call_tool("ask", {"question": "Hello"})
+
+        data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+        assert notifications
+        assert notifications[0]["kind"] == "run_started"
+        assert notifications[-1]["kind"] == "run_completed"
+        assert all(event["request_id"] == data["request_id"] for event in notifications)
+        expected_steps = [event for event in notifications if event["kind"] != "text_delta"]
+        assert data["steps"] == expected_steps
+
     async def test_reset_session_tool(self, agent_server: str) -> None:
         async with (
             streamablehttp_client(agent_server, headers=_HEADERS) as (read, write, _),

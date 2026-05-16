@@ -17,8 +17,10 @@ from mcp import McpError
 from app.agent.agent import AgentResult, GofrAgent
 from app.auth import ALL_ACTIVITIES
 from app.config import GofrAgentConfig
-from app.exceptions import SessionNotFoundError
+from app.exceptions import ServiceRegistrationPolicyError, SessionNotFoundError
 from app.mcp_server.mcp_server import create_mcp_server
+from app.request_context import get_request_id
+from app.services import ServiceConfig
 from app.services.pool import SessionPool
 from app.services.registry import ServiceRegistry
 from app.sessions.store import SessionStore
@@ -40,6 +42,13 @@ class _DenyAll:
 
     def authorised_activities(self, token: str) -> str:
         return ""
+
+
+class _AskOnly:
+    """AuthService that allows ask but not model override."""
+
+    def authorised_activities(self, token: str) -> str:
+        return "GoFRAgentAsk"
 
 
 @contextmanager
@@ -66,7 +75,16 @@ def _make_registry(pools: dict | None = None, tools: list | None = None) -> Magi
     reg = MagicMock(spec=ServiceRegistry)
     reg.all_pools = pools or {}
     reg.all_tools = tools or []
+    reg.all_service_configs = [
+        ServiceConfig(name=name, url=f"http://{name}/mcp") for name in reg.all_pools
+    ]
     reg.register_service = AsyncMock(return_value=[])
+    reg.service_status = MagicMock(
+        side_effect=lambda name: "healthy"
+        if reg.all_pools.get(name) is not None and reg.all_pools[name].is_healthy
+        else "degraded"
+    )
+    reg.service_error = MagicMock(return_value=None)
     return reg
 
 
@@ -160,6 +178,25 @@ class TestListServices:
         with _auth_context(token=None), pytest.raises(McpError):
             await _call_tool(mcp, "list_services")
 
+    async def test_failed_service_appears_with_error(self) -> None:
+        reg = _make_registry(pools={})
+        reg.all_service_configs = [ServiceConfig(name="broken", url="http://broken/mcp")]
+        reg.service_status = MagicMock(return_value="failed")
+        reg.service_error = MagicMock(return_value="probe failed")
+        mcp = create_mcp_server(_make_config(), reg, _make_agent(), _make_store(), _AllowAll())
+
+        with _auth_context():
+            result = await _call_tool(mcp, "list_services")
+
+        assert result == [
+            {
+                "name": "broken",
+                "status": "failed",
+                "tools": [],
+                "error": "probe failed",
+            }
+        ]
+
 
 class TestAsk:
     async def test_ask_returns_answer_and_session_id(self) -> None:
@@ -170,7 +207,9 @@ class TestAsk:
             result = await _call_tool(mcp, "ask", question="What is 2+2?")
         assert result["answer"] == "42"
         assert "session_id" in result
+        assert "request_id" in result
         assert result["session_id"] != ""
+        assert result["request_id"] != ""
 
     async def test_ask_reuses_existing_session(self) -> None:
         store = _make_store()
@@ -199,6 +238,99 @@ class TestAsk:
             await _call_tool(mcp, "ask", question="hello")
         _, call_kwargs = agent.run.call_args
         assert call_kwargs.get("token") == "dev-admin-token"
+
+    async def test_ask_resets_request_context_after_completion(self) -> None:
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), _make_store(), _AllowAll()
+        )
+
+        assert get_request_id() is None
+        with _auth_context():
+            await _call_tool(mcp, "ask", question="hello")
+        assert get_request_id() is None
+
+    async def test_ask_rejects_empty_question(self) -> None:
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), _make_store(), _AllowAll()
+        )
+        with _auth_context(), pytest.raises(McpError, match="question must not be empty"):
+            await _call_tool(mcp, "ask", question="   ")
+
+    async def test_ask_rejects_question_over_length_limit(self) -> None:
+        mcp = create_mcp_server(
+            GofrAgentConfig(max_question_chars=3),
+            _make_registry(),
+            _make_agent(),
+            _make_store(),
+            _AllowAll(),
+        )
+        with _auth_context(), pytest.raises(McpError, match="max_question_chars"):
+            await _call_tool(mcp, "ask", question="four")
+
+    async def test_ask_rejects_context_over_length_limit(self) -> None:
+        mcp = create_mcp_server(
+            GofrAgentConfig(max_context_chars=3),
+            _make_registry(),
+            _make_agent(),
+            _make_store(),
+            _AllowAll(),
+        )
+        with _auth_context(), pytest.raises(McpError, match="max_context_chars"):
+            await _call_tool(mcp, "ask", question="ok", context="four")
+
+    async def test_ask_rejects_max_steps_below_one(self) -> None:
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), _make_store(), _AllowAll()
+        )
+        with _auth_context(), pytest.raises(McpError, match="at least 1"):
+            await _call_tool(mcp, "ask", question="ok", max_steps=0)
+
+    async def test_ask_rejects_max_steps_above_hard_cap(self) -> None:
+        mcp = create_mcp_server(
+            GofrAgentConfig(max_steps_hard_cap=2),
+            _make_registry(),
+            _make_agent(),
+            _make_store(),
+            _AllowAll(),
+        )
+        with _auth_context(), pytest.raises(McpError, match="max_steps_hard_cap"):
+            await _call_tool(mcp, "ask", question="ok", max_steps=3)
+
+    async def test_ask_rejects_model_override_without_activity(self) -> None:
+        mcp = create_mcp_server(
+            GofrAgentConfig(allowed_models=["test:model"]),
+            _make_registry(),
+            _make_agent(),
+            _make_store(),
+            _AskOnly(),
+        )
+        with _auth_context(), pytest.raises(McpError, match="Not authorized"):
+            await _call_tool(mcp, "ask", question="ok", model_override="test:model")
+
+    async def test_ask_rejects_model_override_outside_allow_list(self) -> None:
+        mcp = create_mcp_server(
+            GofrAgentConfig(allowed_models=["allowed:model"]),
+            _make_registry(),
+            _make_agent(),
+            _make_store(),
+            _AllowAll(),
+        )
+        with _auth_context(), pytest.raises(McpError, match="allowed_models"):
+            await _call_tool(mcp, "ask", question="ok", model_override="blocked:model")
+
+    async def test_ask_passes_validated_model_override_to_agent_interface(self) -> None:
+        agent = _make_agent()
+        mcp = create_mcp_server(
+            GofrAgentConfig(allowed_models=["test:model"]),
+            _make_registry(),
+            agent,
+            _make_store(),
+            _AllowAll(),
+        )
+        with _auth_context("dev-admin-token"):
+            await _call_tool(mcp, "ask", question="hello", model_override="test:model")
+        _, call_kwargs = agent.run.call_args
+        assert call_kwargs.get("model_override") == "test:model"
 
 
 class TestResetSession:
@@ -235,7 +367,13 @@ class TestRegisterService:
     async def test_register_calls_registry_and_rebuilds(self) -> None:
         reg = _make_registry()
         agent = _make_agent()
-        mcp = create_mcp_server(_make_config(), reg, agent, _make_store(), _AllowAll())
+        mcp = create_mcp_server(
+            GofrAgentConfig(dynamic_registration_enabled=True),
+            reg,
+            agent,
+            _make_store(),
+            _AllowAll(),
+        )
 
         with _auth_context():
             result = await _call_tool(
@@ -256,6 +394,39 @@ class TestRegisterService:
         )
         with _auth_context(token=None), pytest.raises(McpError):
             await _call_tool(mcp, "register_service", name="s", url="http://s/mcp")
+
+    async def test_register_rejects_when_dynamic_registration_disabled(self) -> None:
+        reg = _make_registry()
+        agent = _make_agent()
+        mcp = create_mcp_server(
+            GofrAgentConfig(dynamic_registration_enabled=False),
+            reg,
+            agent,
+            _make_store(),
+            _AllowAll(),
+        )
+
+        with _auth_context(), pytest.raises(McpError, match="dynamic registration is disabled"):
+            await _call_tool(mcp, "register_service", name="new", url="http://new/mcp")
+
+        reg.register_service.assert_not_awaited()
+        agent.rebuild.assert_not_called()
+
+    async def test_register_surfaces_registry_policy_failures(self) -> None:
+        reg = _make_registry()
+        reg.register_service = AsyncMock(
+            side_effect=ServiceRegistrationPolicyError("host is not in allowed_service_hosts")
+        )
+        mcp = create_mcp_server(
+            GofrAgentConfig(dynamic_registration_enabled=True),
+            reg,
+            _make_agent(),
+            _make_store(),
+            _AllowAll(),
+        )
+
+        with _auth_context(), pytest.raises(McpError, match="allowed_service_hosts"):
+            await _call_tool(mcp, "register_service", name="new", url="http://bad/mcp")
 
 
 class TestRefreshServices:

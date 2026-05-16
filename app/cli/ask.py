@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from typing import Any
 
 import typer
 from mcp import ClientSession
@@ -30,7 +31,7 @@ def ask(
         None, "--reset", help="Clear session history and exit."
     ),
     url: str = typer.Option(
-        os.environ.get("GOFR_AGENT_URL", "http://localhost:8090/mcp"),
+        os.environ.get("GOFR_AGENT_URL", "http://gofr-agent:8090/mcp"),
         "--url",
         help="gofr-agent MCP server URL.",
     ),
@@ -44,6 +45,21 @@ def ask(
         "--max-steps",
         help="Maximum downstream tool-call iterations for this question.",
     ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        help="Print only the final answer.",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Print reasoning details including tool arguments and result summaries.",
+    ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format: text or json.",
+    ),
 ) -> None:
     """Ask the gofr-agent a question."""
     if not token:
@@ -53,6 +69,9 @@ def ask(
             err=True,
         )
         raise typer.Exit(code=1)
+    if output_format not in {"text", "json"}:
+        typer.echo("Error: --format must be 'text' or 'json'.", err=True)
+        raise typer.Exit(code=1)
     asyncio.run(
         _run(
             question=question,
@@ -61,6 +80,9 @@ def ask(
             url=url,
             token=token,
             max_steps=max_steps,
+            quiet=quiet,
+            verbose=verbose,
+            output_format=output_format,
         )
     )
 
@@ -72,18 +94,33 @@ async def _run(
     url: str,
     token: str,
     max_steps: int,
+    quiet: bool,
+    verbose: bool,
+    output_format: str,
 ) -> None:
     headers = {"Authorization": f"Bearer {token}"}
+    events: list[dict[str, Any]] = []
+    renderer = EventRenderer(verbose=verbose)
+
+    async def _capture_log(params: Any) -> None:
+        data = getattr(params, "data", None)
+        if not isinstance(data, dict) or "kind" not in data:
+            return
+        events.append(data)
+        if output_format == "text" and not quiet:
+            renderer.render(data)
+
     async with (
         streamablehttp_client(url, headers=headers) as (read, write, _),
-        ClientSession(read, write) as client,
+        ClientSession(read, write, logging_callback=_capture_log) as client,
     ):
         await client.initialize()
 
         if reset is not None:
             result = await client.call_tool("reset_session", {"session_id": reset})
             typer.echo(f"Session '{reset}' reset.")
-            _print_result(result)
+            payload = _extract_result_payload(result)
+            _print_payload(payload, quiet=False)
             return
 
         if question is None:
@@ -95,24 +132,255 @@ async def _run(
             params["session_id"] = session_id
 
         result = await client.call_tool("ask", params)
-        _print_result(result)
+        payload = _extract_result_payload(result)
+
+    if output_format == "text" and not quiet:
+        renderer.finish()
+
+    if output_format == "json":
+        typer.echo(json.dumps({"events": events, "response": payload}, indent=2))
+        return
+
+    _print_payload(payload, quiet=quiet)
 
 
-def _print_result(result: object) -> None:
+def _extract_result_payload(result: object) -> dict[str, Any]:
     for content in result.content:  # type: ignore[union-attr]
         if hasattr(content, "text"):
             try:
                 data = json.loads(content.text)
-                if "answer" in data:
-                    typer.echo(f"\nAnswer: {data['answer']}")
-                    if data.get("session_id"):
-                        typer.echo(f"Session: {data['session_id']}")
-                    if data.get("tokens_used"):
-                        typer.echo(f"Tokens: {data['tokens_used']}")
-                else:
-                    typer.echo(content.text)
+                if isinstance(data, dict):
+                    return data
+                return {"result": data}
             except (json.JSONDecodeError, TypeError):
-                typer.echo(content.text)
+                return {"raw_text": content.text}
+    return {}
+
+
+def _print_payload(payload: dict[str, Any], *, quiet: bool) -> None:
+    answer = payload.get("answer")
+    if answer is None:
+        raw_text = payload.get("raw_text")
+        if raw_text is not None:
+            typer.echo(str(raw_text))
+            return
+        typer.echo(json.dumps(payload))
+        return
+
+    if quiet:
+        typer.echo(str(answer))
+        return
+
+    typer.echo(f"\nAnswer: {answer}")
+    if payload.get("session_id"):
+        typer.echo(f"Session: {payload['session_id']}")
+    if payload.get("tokens_used"):
+        typer.echo(f"Tokens: {payload['tokens_used']}")
+
+
+class EventRenderer:
+    def __init__(self, *, verbose: bool) -> None:
+        self._verbose = verbose
+        self._pending_thought: dict[str, Any] | None = None
+
+    def render(self, event: dict[str, Any]) -> None:
+        kind = event.get("kind")
+
+        if kind == "text_delta":
+            return
+
+        if kind == "step_started" and event.get("step_kind") == "thought":
+            self._flush_pending_thought(next_event=None)
+            self._pending_thought = event
+            return
+
+        if kind == "step_completed" and event.get("step_kind") == "thought":
+            return
+
+        self._flush_pending_thought(next_event=event)
+
+        if kind == "summary_update":
+            typer.echo("- Summary updated")
+            if self._verbose:
+                _render_detail("summary", event.get("summary"))
+            return
+
+        if kind == "tool_call":
+            typer.echo(f"- Tool: {_tool_label(event)}")
+            if self._verbose:
+                explanation = _tool_explanation(event)
+                if explanation:
+                    _render_detail("about", explanation)
+                _render_detail("args", event.get("arguments", {}))
+            return
+
+        if kind == "tool_retry":
+            attempt = event.get("attempt", "?")
+            message = event.get("message")
+            line = f"- Retry: {_tool_label(event)} (attempt {attempt})"
+            if message:
+                line = f"{line} - {message}"
+            typer.echo(line)
+            return
+
+        if kind == "tool_result":
+            status = "ok" if event.get("ok") else "failed"
+            latency_ms = event.get("latency_ms")
+            latency_suffix = f", {latency_ms} ms" if latency_ms is not None else ""
+            typer.echo(f"- Result: {_tool_label(event)} [{status}{latency_suffix}]")
+            if self._verbose:
+                _render_detail("summary", event.get("summary"))
+            return
+
+        if kind == "run_completed" and self._verbose:
+            answer_preview = event.get("answer_preview")
+            if answer_preview:
+                typer.echo("- Final answer ready")
+                _render_detail("preview", answer_preview)
+            return
+
+        if kind == "run_failed":
+            typer.echo(f"- Failed: {event.get('error', 'unknown error')}", err=True)
+
+    def finish(self) -> None:
+        self._flush_pending_thought(next_event=None)
+
+    def _flush_pending_thought(self, next_event: dict[str, Any] | None) -> None:
+        if self._pending_thought is None:
+            return
+        typer.echo(f"- Thinking: {_thinking_label(self._pending_thought, next_event)}")
+        self._pending_thought = None
+
+
+def _tool_label(event: dict[str, Any]) -> str:
+    service = str(event.get("service", "")).strip()
+    tool = str(event.get("tool", "")).strip()
+    if service and tool:
+        return f"{service}.{tool}"
+    return tool or service or "unknown"
+
+
+def _thinking_label(
+    event: dict[str, Any],
+    next_event: dict[str, Any] | None,
+) -> str:
+    title = str(event.get("title", "")).strip()
+    if title not in {"", "model_request"}:
+        return title.replace("_", " ")
+
+    next_kind = "" if next_event is None else str(next_event.get("kind", "")).strip()
+    next_step_kind = (
+        "" if next_event is None else str(next_event.get("step_kind", "")).strip()
+    )
+    if next_kind == "tool_call" or (next_kind == "step_started" and next_step_kind == "tool_call"):
+        return "planning next tool"
+    if next_kind == "run_completed":
+        return "composing final answer"
+    if next_kind == "run_failed":
+        return "handling run failure"
+    return "model reasoning"
+
+
+def _tool_explanation(event: dict[str, Any]) -> str:
+    service = str(event.get("service", "")).strip()
+    tool = str(event.get("tool", "")).strip()
+    arguments = event.get("arguments", {})
+    if not isinstance(arguments, dict):
+        arguments = {}
+
+    known_key = (service, tool)
+    if known_key == ("analytics", "simple_return"):
+        return _compose_explanation("calculate simple return", arguments)
+    if known_key == ("analytics", "historical_volatility"):
+        return _compose_explanation("calculate historical volatility", arguments)
+    if known_key == ("analytics", "max_drawdown"):
+        return _compose_explanation("calculate maximum drawdown", arguments)
+    if known_key == ("analytics", "position_market_value"):
+        return _compose_explanation("calculate position market value", arguments)
+    if known_key == ("trades", "get_realised_pnl"):
+        return _compose_explanation("calculate realised P&L", arguments)
+    if known_key == ("trades", "get_average_execution_price"):
+        return _compose_explanation("calculate average execution price", arguments)
+    if known_key == ("instruments", "get_ohlcv_history"):
+        return _compose_explanation("fetch OHLCV price history", arguments)
+    if known_key == ("clients", "get_holding"):
+        return _compose_explanation("look up a client holding", arguments)
+
+    action = tool.replace("_", " ").strip()
+    if action.startswith("get "):
+        action = action.removeprefix("get ")
+    return _compose_explanation(action or _tool_label(event), arguments)
+
+
+def _compose_explanation(action: str, arguments: dict[str, Any]) -> str:
+    instrument = _argument_value(
+        arguments,
+        "symbol",
+        "ticker",
+        "instrument",
+        "instrument_id",
+        "isin",
+    )
+    client = _argument_value(arguments, "client_id", "client", "client_name")
+    period_days = _argument_value(
+        arguments,
+        "days",
+        "lookback_days",
+        "window_days",
+        "period_days",
+    )
+    context_parts: list[str] = []
+    if period_days is not None and period_days != "":
+        context_parts.append(f"for the last {period_days} days")
+    if client is not None and client != "":
+        context_parts.append(f"for client {client}")
+    if instrument is not None and instrument != "":
+        context_parts.append(f"for {instrument}")
+
+    if not context_parts:
+        return action
+    return f"{action} {' '.join(context_parts)}"
+
+
+def _argument_value(arguments: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = arguments.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _render_detail(label: str, value: Any) -> None:
+    rendered = _format_detail_value(value)
+    if not rendered:
+        return
+    if "\n" not in rendered:
+        typer.echo(f"  {label}: {rendered}")
+        return
+    typer.echo(f"  {label}:")
+    for line in rendered.splitlines():
+        typer.echo(f"    {line}")
+
+
+def _format_detail_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list)):
+        compact = json.dumps(value, sort_keys=True)
+        if len(compact) > 80 or _has_nested_structure(value):
+            return json.dumps(value, sort_keys=True, indent=2)
+        return compact
+    return str(value)
+
+
+def _has_nested_structure(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(isinstance(item, (dict, list)) for item in value.values())
+    if isinstance(value, list):
+        return any(isinstance(item, (dict, list)) for item in value)
+    return False
 
 
 if __name__ == "__main__":

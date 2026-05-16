@@ -18,6 +18,14 @@ import pytest
 
 # Directories checked by all quality tools
 CHECK_DIRS = ["app", "tests", "scripts"]
+MIGRATED_LOGGING_FILES = [
+    "app/main_mcp.py",
+    "app/mcp_server/mcp_server.py",
+    "app/agent/agent.py",
+    "app/services/pool.py",
+    "app/services/registry.py",
+    "app/sessions/store.py",
+]
 
 
 class TestCodeQuality:
@@ -258,6 +266,29 @@ class TestCodeQuality:
                         "",
                         "Fix circular imports or missing __init__.py files.",
                     ]
+                )
+            )
+
+    def test_migrated_modules_do_not_use_stdlib_logging(self, project_root: Path) -> None:
+        """Prevent reasoning-path modules from slipping back to stdlib logging."""
+        violations: list[str] = []
+
+        for relative_path in MIGRATED_LOGGING_FILES:
+            file_path = project_root / relative_path
+            if not file_path.exists():
+                continue
+            content = file_path.read_text(encoding="utf-8")
+            if "import logging" in content:
+                violations.append(f"{relative_path}: import logging")
+            if "logging.getLogger" in content:
+                violations.append(f"{relative_path}: logging.getLogger")
+            if "logging.LoggerAdapter" in content:
+                violations.append(f"{relative_path}: logging.LoggerAdapter")
+
+        if violations:
+            pytest.fail(
+                "\n".join(
+                    ["Stdlib logging is forbidden in migrated modules:"] + violations
                 )
             )
 

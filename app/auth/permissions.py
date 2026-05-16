@@ -11,6 +11,7 @@ from app.exceptions import AuthorizationError
 AGENT_PING = "GoFRAgentPing"
 AGENT_LIST_SERVICES = "GoFRAgentListServices"
 AGENT_ASK = "GoFRAgentAsk"
+AGENT_MODEL_OVERRIDE = "GoFRAgentModelOverride"
 AGENT_RESET_SESSION = "GoFRAgentResetSession"
 AGENT_REGISTER_SERVICE = "GoFRAgentRegisterService"
 AGENT_REFRESH_SERVICES = "GoFRAgentRefreshServices"
@@ -19,6 +20,7 @@ ALL_ACTIVITIES: list[str] = [
     AGENT_PING,
     AGENT_LIST_SERVICES,
     AGENT_ASK,
+    AGENT_MODEL_OVERRIDE,
     AGENT_RESET_SESSION,
     AGENT_REGISTER_SERVICE,
     AGENT_REFRESH_SERVICES,

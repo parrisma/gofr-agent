@@ -84,7 +84,7 @@ class AgentServerThread(threading.Thread):
         self.server.should_exit = True
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Start fixture MCP services and chat with gofr-agent from the CLI.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -133,6 +133,11 @@ def parse_args() -> argparse.Namespace:
         help="Maximum downstream tool-call iterations per question.",
     )
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Forward --verbose to app.cli.ask so tool arguments and summaries are shown.",
+    )
+    parser.add_argument(
         "--skip-build",
         action="store_true",
         help="Do not rebuild the fixture image before starting the stack.",
@@ -147,7 +152,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Leave the fixture stack running when this script exits.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -287,7 +292,14 @@ async def build_agent_app(
     return AuthHeaderMiddleware(mcp.streamable_http_app()), registry
 
 
-def ask_cli(server_url: str, session: str, question: str, max_steps: int) -> int:
+def ask_cli(
+    server_url: str,
+    session: str,
+    question: str,
+    max_steps: int,
+    *,
+    verbose: bool = False,
+) -> int:
     command = [
         "uv",
         "run",
@@ -302,8 +314,10 @@ def ask_cli(server_url: str, session: str, question: str, max_steps: int) -> int
         session,
         "--max-steps",
         str(max_steps),
-        question,
     ]
+    if verbose:
+        command.append("--verbose")
+    command.append(question)
     return subprocess.run(command, cwd=PROJECT_ROOT, check=False).returncode
 
 
@@ -344,7 +358,7 @@ def configure_logging(log_level: str) -> None:
     logging.getLogger("asyncio").disabled = True
 
 
-def repl(server_url: str, session: str, max_steps: int) -> int:
+def repl(server_url: str, session: str, max_steps: int, *, verbose: bool) -> int:
     while True:
         try:
             question = input("gofr> ").strip()
@@ -372,7 +386,7 @@ def repl(server_url: str, session: str, max_steps: int) -> int:
             ]
             subprocess.run(reset, cwd=PROJECT_ROOT, check=False)
             continue
-        ask_cli(server_url, session, question, max_steps)
+        ask_cli(server_url, session, question, max_steps, verbose=verbose)
 
 
 def main() -> int:
@@ -397,8 +411,14 @@ def main() -> int:
         print_intro(server_url, args.session, hosts, args.model)
 
         if args.once:
-            return ask_cli(server_url, args.session, args.once, args.max_steps)
-        return repl(server_url, args.session, args.max_steps)
+            return ask_cli(
+                server_url,
+                args.session,
+                args.once,
+                args.max_steps,
+                verbose=args.verbose,
+            )
+        return repl(server_url, args.session, args.max_steps, verbose=args.verbose)
     finally:
         if thread is not None:
             thread.shutdown()

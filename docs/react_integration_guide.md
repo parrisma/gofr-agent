@@ -10,11 +10,10 @@ This document describes:
 1. What gofr-agent is and how it is exposed today.
 2. The exact wire protocol the React app must speak (MCP Streamable HTTP).
 3. The `ask` tool: inputs, outputs, session semantics, auth.
-4. What is and is **not** currently supported (no live step streaming, no
-   mid-run user input).
-5. Two recommended server-side extensions (SSE step events, interactive
-   "ask the user" pause/resume) the React-side LLM may request from the
-   gofr-agent maintainer if richer UX is required.
+4. What is and is **not** currently supported (live reasoning notifications
+  are supported; mid-run user input is not).
+5. The current reasoning-notification contract plus one remaining
+  recommended extension (interactive "ask the user" pause/resume).
 6. Reference TypeScript snippets the React-side LLM can adapt directly.
 
 ---
@@ -31,8 +30,8 @@ Key facts:
 
 - Transport: **MCP Streamable HTTP** (single endpoint, default `/mcp`).
 - Default URL inside the dev container: `http://gofr-agent:8090/mcp`.
-- Default URL when proxied to a host browser: whatever the deployment
-  exposes; typical local dev: `http://localhost:8090/mcp`.
+- Browser clients need whatever externally reachable origin the deployment
+  exposes; inside the Docker dev network, use the `gofr-agent` service name.
 - LLM backend: configurable. Default in dev: `deepseek/deepseek-v4-pro`
   via OpenRouter.
 - Auth: Bearer token in the `Authorization` HTTP header. Required on
@@ -58,7 +57,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const transport = new StreamableHTTPClientTransport(
-  new URL("http://localhost:8090/mcp"),
+  new URL("http://gofr-agent:8090/mcp"),
   {
     requestInit: {
       headers: { Authorization: `Bearer ${token}` },
@@ -72,6 +71,18 @@ const client = new Client(
 );
 
 await client.connect(transport);
+await client.setLoggingLevel("info");
+
+client.setNotificationHandler("notifications/message", notification => {
+  const payload = notification.params?.data;
+  if (!payload || typeof payload !== "object") return;
+  if ((payload as { kind?: unknown }).kind === undefined) return;
+  const logger = notification.params?.logger;
+  if (logger !== "gofr-agent.reasoning") return;
+
+  // Append payload to your active turn's reasoning trace.
+  console.log("reasoning event", payload);
+});
 ```
 
 Once connected, the React app calls server-side tools by name:
@@ -90,6 +101,11 @@ const result = await client.callTool({
 The MCP `callTool` response is a `CallToolResult` with a `content` array.
 gofr-agent always returns a single `TextContent` whose `.text` field is a
 JSON string — parse it to get the structured result described below.
+
+While `ask` is running, gofr-agent emits MCP logging notifications. For
+reasoning events, the notification method is `notifications/message`, the logger
+is `gofr-agent.reasoning`, and the notification `data` field is the event
+payload described below.
 
 CORS: the gofr-agent process is `uvicorn` + Starlette. If the React app
 is served from a different origin, the operator must add a CORS
@@ -124,19 +140,27 @@ token grants every activity below.
   - `max_steps` (int, optional, default 10): hard cap on tool-call
     iterations the agent is allowed for this question. Increase for
     complex multi-service questions (20–30 is typical).
+  - `model_override` (string, optional): allow-listed model override.
+    The caller must also hold `AGENT_MODEL_OVERRIDE`.
 - Returns:
   ```json
   {
     "session_id": "ui-session-1",
+    "request_id": "req-123",
     "answer": "final natural-language answer",
-    "steps": [],
+    "steps": [
+      {"kind": "run_started", "sequence": 1},
+      {"kind": "run_completed", "sequence": 7}
+    ],
     "model": "deepseek/deepseek-v4-pro",
     "tokens_used": 1234
   }
   ```
-- **Important**: today, `steps` is always `[]` and the call is fully
-  blocking — the HTTP response only arrives once the agent has finished.
-  See section 4 for what this means for UX.
+- **Important**: `ask` still returns its final response only once the run has
+  finished, but the server now emits live reasoning notifications during the
+  run. `steps` is a compact non-text subset derived from that same event
+  sequence. Tool-using runs and summary-compaction runs produce non-empty
+  `steps`.
 
 ### `reset_session`
 - Args: `{ session_id: string }`.
@@ -146,6 +170,8 @@ token grants every activity below.
 ### `register_service`
 - Args: `{ name, url, token?, description? }`.
 - Returns: `{ status: "registered", name, tools_discovered: <int> }`.
+- Policy: requires runtime registration to be enabled server-side and the target
+  host to match `allowed_service_hosts`.
 - Use for: admin UI only. Most React apps will not need this.
 
 ### `refresh_services`
@@ -161,83 +187,106 @@ The brief mentions two desired UX features:
 1. **Show step-by-step reasoning as it happens.**
 2. **Allow the user to provide additional input mid-run.**
 
-Neither is supported by the current gofr-agent build. Specifically:
+The first is supported; the second is not. Specifically:
 
-- `ask` is a single request/response; the server emits no incremental
-  events while the agent is thinking. The `steps` field in the response
-  is currently always empty, so even after-the-fact step inspection is
-  not available without a server change.
+- `ask` is still a single request/response for the final payload, but the
+  server emits live MCP reasoning notifications while the run is in flight.
+  Clients that ignore notifications can still rely on the final response.
 - The agent has no "human-in-the-loop" mechanism. Once `ask` is in
   flight, there is no protocol to send extra input to the running run
   short of cancelling and starting over with a more detailed prompt
   (which loses partial work).
 
 **The React-side LLM should not invent client-side workarounds for
-these.** Showing fake "thinking..." steps, polling, or trying to
-intercept the model output stream from the browser will not work —
-that data does not leave the server today.
+mid-run input.** Do not fake pause/resume semantics that the server does not
+support.
 
 What the React app **can** do today, with no server changes:
 
 - Render a normal chat UI: input box, list of turns, send button.
-- Show a single in-progress spinner while `ask` is running.
+- Subscribe to reasoning notifications and render a live reasoning panel.
+- Show a spinner while `ask` is running.
 - Persist `session_id` per chat thread and reuse it across turns.
 - Provide a "Reset" button that calls `reset_session`.
 - Expose a "max steps" advanced setting (default 10, raise for complex
   queries).
-- Surface `tokens_used` and `model` from the response as metadata.
+- Surface `request_id`, `tokens_used`, and `model` from the response as
+  metadata.
 - Catch MCP `McpError` and show the `.message` to the user. Common
   cases: missing/invalid token (`INVALID_PARAMS`), `tool_calls_limit`
   exceeded (raise `max_steps`).
 
 ---
 
-## 5. Recommended server-side extensions (request these from the gofr-agent maintainer)
+## 5. Current reasoning notification contract and remaining extension
 
-These are the minimum API additions needed to deliver the two desired
-UX features. The React-side LLM should not implement them; it should
-**request** them and design the React UI assuming they will land in the
-shape described below. If/when they ship, the React code can switch
-over without rewriting the chat shell.
+### 5a. Live reasoning notifications (current)
 
-### 5a. Streaming step events (SSE)
+The server now emits reasoning events as MCP logging notifications while
+`ask` runs.
 
-Proposed new HTTP endpoint, parallel to the MCP endpoint:
+Notification contract:
 
-```
-GET  /agent/ask/stream?session_id=...&max_steps=...
-POST /agent/ask/stream
-       body: { question, session_id?, context?, max_steps? }
-       headers: Authorization: Bearer <token>
-       response: text/event-stream (SSE)
-```
+- MCP notification type: logging/message.
+- Logger: `gofr-agent.reasoning`.
+- Payload: `params.data` is the event object.
+- Correlation: each event includes the same `request_id` returned by the final
+  `ask` response.
 
-Event types the React app should expect to render:
+Event kinds currently emitted:
 
-| `event:` | `data:` payload (JSON)                                              | UI hint |
-|----------|---------------------------------------------------------------------|---------|
-| `start`  | `{ session_id, model }`                                             | Begin a new "thinking" panel |
-| `step`   | `{ index, kind: "tool_call", service, tool, args }`                 | "Calling `clients.get_holdings({...})`" |
-| `step`   | `{ index, kind: "tool_result", service, tool, result_preview }`    | Show truncated result under the call |
-| `step`   | `{ index, kind: "thought", text }`                                  | Italicised line of model narration |
-| `token`  | `{ text }`                                                          | Append to the streaming final-answer area |
-| `done`   | `{ answer, tokens_used, steps }`                                    | Finalise and persist the turn |
-| `error`  | `{ code, message }`                                                 | Show error toast, end stream |
+| `kind` | Meaning |
+|--------|---------|
+| `run_started` | The `ask` run has started |
+| `step_started` | A logical reasoning/tool step has started |
+| `text_delta` | Incremental model text |
+| `tool_call` | The model requested a downstream tool |
+| `tool_retry` | A transient tool failure is being retried |
+| `tool_result` | A downstream tool completed |
+| `summary_update` | Older session history was compacted into the rolling summary |
+| `step_completed` | A logical step finished |
+| `run_completed` | The run finished successfully |
+| `run_failed` | The run failed before completion |
 
-Auth and `session_id` semantics are identical to the MCP `ask` tool.
-The MCP `ask` tool should remain available unchanged for non-UI clients.
+The final `steps` array in the `ask` response is derived from the same event
+sequence, excluding `text_delta` events.
+
+Shared fields on every event:
+
+| Field | Meaning |
+|-------|---------|
+| `request_id` | Correlates the run across notifications, logs, and final response |
+| `session_id` | Conversation session id |
+| `event_id` | Unique event id |
+| `sequence` | Monotonic event order |
+| `kind` | Event type |
+| `timestamp` | UTC timestamp |
+
+Important payload fields by kind:
+
+| `kind` | Additional fields |
+|--------|-------------------|
+| `tool_call` | `service`, `tool`, `arguments`, `attempt` |
+| `tool_retry` | `service`, `tool`, `attempt`, `message` |
+| `tool_result` | `service`, `tool`, `ok`, `summary`, `attempt`, `latency_ms`, `truncated` |
+| `summary_update` | `summary` |
+| `run_completed` | `model`, `answer_preview`, `tokens_used` |
+| `run_failed` | `error`, `fatal` |
 
 ### 5b. Human-in-the-loop input
 
-Add one extra event type plus one POST endpoint:
+This is still not implemented. If you need it, request a server-side extension.
+
+One reasonable direction is a future notification type such as:
 
 | `event:` | `data:` payload                                                     |
 |----------|---------------------------------------------------------------------|
 | `prompt` | `{ prompt_id, question, schema?: JSONSchema, choices?: string[] }`  |
 
-When the React app receives a `prompt` event the SSE stream pauses
-(keep the connection open). The UI shows the question to the user.
-When the user answers, the React app POSTs:
+The UI would show the question to the user and then send a follow-up response
+back to the server.
+
+One possible API shape:
 
 ```
 POST /agent/ask/respond
@@ -245,18 +294,14 @@ POST /agent/ask/respond
   headers: Authorization: Bearer <token>
 ```
 
-The server resumes the run; subsequent `step` / `token` / `done`
-events continue on the original SSE stream.
-
-The agent side requires a new pydantic-ai tool, e.g. `ask_user(question,
-schema?)`, that suspends the run on a `Future` keyed by `prompt_id`
-until `/agent/ask/respond` resolves it.
-
 ---
 
 ## 6. Reference TypeScript snippets
 
-### Chat hook (today's API — blocking `ask`)
+### Chat hook (today's API — final response plus notifications)
+
+This snippet shows both the notification subscription and the final-response
+path using the MCP TypeScript SDK's `setNotificationHandler` API.
 
 ```ts
 import { useState, useCallback, useRef } from "react";
@@ -268,6 +313,7 @@ type Turn = { role: "user" | "agent"; text: string };
 export function useGofrAgent(opts: { url: string; token: string }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
+  const [events, setEvents] = useState<Record<string, unknown[]>>({});
   const sessionId = useRef(crypto.randomUUID());
   const clientRef = useRef<Client | null>(null);
 
@@ -281,6 +327,18 @@ export function useGofrAgent(opts: { url: string; token: string }) {
       { capabilities: {} },
     );
     await client.connect(transport);
+    await client.setLoggingLevel("info");
+    client.setNotificationHandler("notifications/message", notification => {
+      if (notification.params?.logger !== "gofr-agent.reasoning") return;
+      const payload = notification.params?.data;
+      if (!payload || typeof payload !== "object") return;
+      const event = payload as { request_id?: string };
+      const requestId = event.request_id ?? "pending";
+      setEvents(prev => ({
+        ...prev,
+        [requestId]: [...(prev[requestId] ?? []), payload],
+      }));
+    });
     clientRef.current = client;
     return client;
   }, [opts.url, opts.token]);
@@ -299,7 +357,10 @@ export function useGofrAgent(opts: { url: string; token: string }) {
         },
       });
       const text = (res.content?.[0] as { text?: string })?.text ?? "{}";
-      const data = JSON.parse(text) as { answer: string };
+      const data = JSON.parse(text) as {
+        request_id: string;
+        answer: string;
+      };
       setTurns(t => [...t, { role: "agent", text: data.answer }]);
     } finally {
       setBusy(false);
@@ -315,115 +376,35 @@ export function useGofrAgent(opts: { url: string; token: string }) {
     setTurns([]);
   }, [ensureClient]);
 
-  return { turns, busy, ask, reset };
+  return { turns, events, busy, ask, reset };
 }
 ```
 
-### SSE consumer (when 5a/5b ship)
-
-```ts
-async function streamAsk(opts: {
-  url: string;             // e.g. http://localhost:8090/agent/ask/stream
-  token: string;
-  question: string;
-  sessionId: string;
-  maxSteps?: number;
-  onStart: (e: { session_id: string; model: string }) => void;
-  onStep: (e: any) => void;
-  onToken: (text: string) => void;
-  onPrompt: (e: { prompt_id: string; question: string }) => Promise<unknown>;
-  onDone: (e: { answer: string; tokens_used: number; steps: any[] }) => void;
-  onError: (e: { code: string; message: string }) => void;
-  signal?: AbortSignal;
-}) {
-  const resp = await fetch(opts.url, {
-    method: "POST",
-    signal: opts.signal,
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-      Authorization: `Bearer ${opts.token}`,
-    },
-    body: JSON.stringify({
-      question: opts.question,
-      session_id: opts.sessionId,
-      max_steps: opts.maxSteps ?? 20,
-    }),
-  });
-  if (!resp.ok || !resp.body) {
-    opts.onError({ code: String(resp.status), message: await resp.text() });
-    return;
-  }
-
-  const reader = resp.body.pipeThrough(new TextDecoderStream()).getReader();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += value;
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() ?? "";
-    for (const frame of frames) {
-      const evtMatch = frame.match(/^event:\s*(.+)$/m);
-      const dataMatch = frame.match(/^data:\s*(.+)$/m);
-      if (!dataMatch) continue;
-      const evt = evtMatch?.[1] ?? "message";
-      const data = JSON.parse(dataMatch[1]);
-      switch (evt) {
-        case "start":  opts.onStart(data); break;
-        case "step":   opts.onStep(data); break;
-        case "token":  opts.onToken(data.text); break;
-        case "prompt": {
-          const value = await opts.onPrompt(data);
-          await fetch(opts.url.replace("/stream", "/respond"), {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${opts.token}`,
-            },
-            body: JSON.stringify({
-              session_id: opts.sessionId,
-              prompt_id: data.prompt_id,
-              value,
-            }),
-          });
-          break;
-        }
-        case "done":  opts.onDone(data); return;
-        case "error": opts.onError(data); return;
-      }
-    }
-  }
-}
-```
+The older SSE-based sketch is obsolete. The current server streams reasoning
+over MCP logging notifications, not over a parallel SSE endpoint.
 
 ---
 
 ## 7. Suggested phased implementation for the React project
 
-Phase 1 — works against today's gofr-agent:
+Phase 1 — shipped server capabilities:
 
 1. Add a settings panel with `url`, `token`, `max_steps`.
-2. Implement the chat hook from §6 (blocking `ask`).
+2. Implement the chat hook from §6.
 3. On mount, call `ping` then `list_services`; show the latter in a
    collapsible "Capabilities" panel so the user can see what data the
    agent has access to.
-4. Show a single spinner per turn while `ask` is in flight.
-5. Render `tokens_used` and `model` as metadata under each agent turn.
+4. Register a logging-notification handler and render incoming reasoning
+   events as a collapsible trace under the active turn.
+5. Show a spinner while `ask` is in flight.
+6. Render `request_id`, `tokens_used`, and `model` as metadata under each
+   agent turn.
 
-Phase 2 — once §5a (SSE step events) is delivered server-side:
+Phase 2 — once §5b (human-in-the-loop) is delivered server-side:
 
-6. Replace the chat hook's `ask` implementation with the SSE consumer
-   from §6. Keep the same hook signature so call sites do not change.
-7. Render incoming `step` events as a collapsible "reasoning trace"
-   under the agent turn (tool name, args, truncated result).
-8. Stream `token` events into the visible answer area.
-
-Phase 3 — once §5b (human-in-the-loop) is delivered server-side:
-
-9. Add a `<PromptModal>` rendered when `onPrompt` fires; resolve its
+7. Add a `<PromptModal>` rendered when `prompt` arrives; resolve its
    promise with the user's answer to unblock the run.
-10. Persist the prompt history alongside the steps so a turn replay
+8. Persist the prompt history alongside the steps so a turn replay
     shows the full interaction.
 
 ---
