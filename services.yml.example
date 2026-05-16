@@ -8,10 +8,14 @@
 # ──────
 # name        (required) — identifier used in tool names, e.g. "rag" → tools
 #               become "rag__search", "rag__ingest", …
-# url         (required) — Streamable-HTTP MCP endpoint
+# url         (required) — Streamable-HTTP MCP endpoint reachable from the
+#               gofr-agent container. Use Docker service names or routable DNS
+#               names, never localhost/127.0.0.1 for service-to-service calls.
 # token       (optional) — bearer token sent in Authorization header
 # token_env   (optional) — name of env-var that holds the bearer token
 #                          (takes precedence over `token`)
+# hub_callback_token_env (optional) — env-var holding the service -> gofr-agent
+#               callback token for `_store_result` / `_get_result` access
 # description (optional) — shown in the agent's system prompt
 # enabled     (optional, default: true) — set to false to skip the service
 #
@@ -19,19 +23,20 @@
 
 services:
 
-  # ── Example 1: local RAG service ──────────────────────────────────────────
-  - name: rag
-    url: http://localhost:8100/mcp
+  # ── Example 1: hub-capable market data service ────────────────────────────
+  - name: instruments
+    url: http://gofr-instruments:8100/mcp
     description: >
-      Retrieval-augmented generation service. Use this to search the internal
-      knowledge base before answering questions about company policy, products
-      or documentation.
-    # token_env: RAG_MCP_TOKEN     # uncomment to read token from env var
+      Instrument metadata and OHLCV history. This service can publish large
+      bar sets to the gofr-agent results hub and return descriptors instead of
+      inline payloads.
+    token_env: INSTRUMENTS_MCP_TOKEN
+    hub_callback_token_env: INSTRUMENTS_HUB_CALLBACK_TOKEN
     enabled: true
 
   # ── Example 2: code-execution sandbox ─────────────────────────────────────
   - name: sandbox
-    url: http://localhost:8200/mcp
+    url: http://gofr-sandbox:8200/mcp
     description: >
       Secure Python sandbox. Use this to run calculations, data transformations
       or to verify code snippets.
@@ -40,6 +45,6 @@ services:
 
   # ── Example 3: disabled / staging service ─────────────────────────────────
   - name: staging-search
-    url: http://staging.internal:9000/mcp
+    url: https://staging-search.internal.example/mcp
     description: Staging search service (currently disabled).
     enabled: false

@@ -21,6 +21,10 @@ def _manifest(url: str) -> ServicesManifest:
     return ServicesManifest(services=[svc])
 
 
+async def _shutdown_registry(registry: ServiceRegistry) -> None:
+    await registry.shutdown()
+
+
 class TestRegistryIntegration:
     async def test_load_manifest_discovers_tools(self, mock_mcp_url: str) -> None:
         registry = ServiceRegistry(_config())
@@ -31,7 +35,7 @@ class TestRegistryIntegration:
             assert "echo" in names
             assert "add" in names
         finally:
-            await registry.shutdown()
+            await _shutdown_registry(registry)
 
     async def test_get_pool_returns_healthy_pool(self, mock_mcp_url: str) -> None:
         registry = ServiceRegistry(_config())
@@ -41,7 +45,7 @@ class TestRegistryIntegration:
             assert pool is not None
             assert pool.is_healthy
         finally:
-            await registry.shutdown()
+            await _shutdown_registry(registry)
 
     async def test_concurrent_checkouts(self, mock_mcp_url: str) -> None:
         """Pool should allow concurrent tool calls up to pool_size."""
@@ -62,7 +66,7 @@ class TestRegistryIntegration:
             )
             assert set(results) == {"a", "b", "c"}
         finally:
-            await registry.shutdown()
+            await _shutdown_registry(registry)
 
     async def test_unknown_service_returns_none(self, mock_mcp_url: str) -> None:
         registry = ServiceRegistry(_config())
@@ -70,7 +74,7 @@ class TestRegistryIntegration:
         try:
             assert registry.get_pool("nonexistent") is None
         finally:
-            await registry.shutdown()
+            await _shutdown_registry(registry)
 
     async def test_dynamic_registration_discovers_tools_when_host_allowed(
         self, mock_mcp_url: str
@@ -87,7 +91,7 @@ class TestRegistryIntegration:
             )
             assert {tool.name for tool in tools} >= {"echo", "add"}
         finally:
-            await registry.shutdown()
+            await _shutdown_registry(registry)
 
     async def test_dynamic_registration_rejects_disallowed_host(self) -> None:
         registry = ServiceRegistry(

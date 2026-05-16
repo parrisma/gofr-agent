@@ -1,6 +1,6 @@
 # MCP Results Hub Implementation Plan
 
-Status: DRAFT v4 - explicit implementation runbook
+Status: COMPLETE (validated 2026-05-16)
 Spec: `docs/mcp_artifact_handoff_spec.md`
 
 ## Read This First
@@ -148,18 +148,27 @@ full validation set passes.
 
 | Phase | Status | Required Evidence |
 |-------|--------|-------------------|
-| 0a | TODO | Config + auth + ServiceConfig callback fields pass, full suite passes |
-| 0b | TODO | Real `_store_result` reentrancy passes, full suite passes |
-| 1 | TODO | Models/errors tests pass, full suite passes |
-| 2 | TODO | Store tests pass, full suite passes |
-| 3 | TODO | Hub MCP tool tests and hidden-tool tests pass, full suite passes |
-| 4a | TODO | Registration tests pass, full suite passes |
-| 4b | TODO | Capability surfacing tests pass, full suite passes |
-| 5 | TODO | Fixture producer tests pass, full suite passes |
-| 6 | TODO | Fixture consumer tests pass, full suite passes |
-| 7 | TODO | Agent orchestration tests pass, full suite passes |
-| 8 | TODO | Positive and negative end-to-end tests pass, full suite passes |
-| 9 | TODO | Docs/example validation and full suite pass |
+| 0a | COMPLETE | Hub config/auth/callback-token coverage implemented; final `./scripts/run_tests.sh -v` passed |
+| 0b | COMPLETE | Real `_store_result` reentrancy coverage implemented; final `./scripts/run_tests.sh -v` passed |
+| 1 | COMPLETE | Protocol model/error coverage implemented; final `./scripts/run_tests.sh -v` passed |
+| 2 | COMPLETE | Store TTL/capacity/bounds coverage implemented; `tmp/remediation_slice.txt` and final full suite passed |
+| 3 | COMPLETE | Hub tool auth/filtering coverage implemented; final `./scripts/run_tests.sh -v` passed |
+| 4a | COMPLETE | Hub registration integration coverage implemented; final `./scripts/run_tests.sh -v` passed |
+| 4b | COMPLETE | `list_services` capability/no-secret coverage implemented; final `./scripts/run_tests.sh -v` passed |
+| 5 | COMPLETE | Descriptor-producing instruments path implemented; final `./scripts/run_tests.sh -v` passed |
+| 6 | COMPLETE | Descriptor-consuming analytics path and negative-path coverage implemented; final `./scripts/run_tests.sh -v` passed |
+| 7 | COMPLETE | Descriptor passthrough/prompt guidance coverage implemented; final `./scripts/run_tests.sh -v` passed |
+| 8 | COMPLETE | End-to-end descriptor workflow and negative paths green; `tmp/fixture_chat_final.txt` passed in descriptor mode |
+| Review remediation | COMPLETE | `tmp/remediation_slice.txt`, `tmp/nodeid_after_fix.txt`, and final `./scripts/run_tests.sh -v` passed |
+| 9 | COMPLETE | Docs/examples updated; grep checks, `./scripts/run_tests.sh --quality`, and final `./scripts/run_tests.sh -v` passed |
+
+Evidence artefacts generated during final validation:
+
+- `tmp/remediation_slice.txt`
+- `tmp/nodeid_after_fix.txt`
+- `tmp/quality_final.txt`
+- `tmp/full_suite_final.txt`
+- `tmp/fixture_chat_final.txt`
 
 ## Phase 0a - Config, Permissions, And Callback Token Plumbing
 
@@ -251,13 +260,14 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Phase 0a checkpoint:
+Phase 0a checkpoint: COMPLETE (validated 2026-05-16)
 
 - Hub config fields are typed and validated.
 - Hub activities exist and are not granted to ordinary tokens.
 - `ServiceConfig` carries callback token info but never leaks it.
 - `resolve_service_principal` works deterministically.
 - Full suite passes.
+- Evidence: final validation finished cleanly through `./scripts/run_tests.sh -v`; see the Checkpoint Log and `tmp/full_suite_final.txt`.
 
 ## Phase 0b - Real `_store_result` Reentrancy Spike
 
@@ -321,13 +331,14 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Phase 0b checkpoint:
+Phase 0b checkpoint: COMPLETE (validated 2026-05-16)
 
 - `_store_result` is reachable reentrantly from a fixture service.
 - Concurrent reentrant stores do not deadlock.
 - Producer principal mismatch is rejected.
 - Missing/invalid callback token is rejected.
 - Full suite passes.
+- Evidence: reentrancy coverage is part of the green final suite; see the Checkpoint Log and `tmp/full_suite_final.txt`.
 
 If any checkpoint item fails, stop. Do not proceed to Phase 1.
 
@@ -383,12 +394,13 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Phase 1 checkpoint:
+Phase 1 checkpoint: COMPLETE (validated 2026-05-16)
 
 - Protocol models match the spec schemas.
 - Error codes match the spec exactly.
 - Descriptors cannot leak payloads.
 - Full suite passes.
+- Evidence: protocol-model and error coverage remained green in the final suite; see `tmp/full_suite_final.txt`.
 
 ## Phase 2 - Result Store
 
@@ -444,12 +456,13 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Phase 2 checkpoint:
+Phase 2 checkpoint: COMPLETE (validated 2026-05-16)
 
 - Store limits and TTL are deterministic under test.
 - GUIDs are unguessable.
 - Metadata is authoritative.
 - Full suite passes.
+- Evidence: store-limit coverage, including advisory-metadata bounds, passed in `tmp/remediation_slice.txt` and the final suite.
 
 ## Phase 3 - Hub MCP Tools, Auth, And Hidden-Tool Filtering
 
@@ -517,12 +530,13 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Phase 3 checkpoint:
+Phase 3 checkpoint: COMPLETE (validated 2026-05-16)
 
 - Hub tools are protected and schema-validating.
 - Model-facing surfaces cannot call hub tools.
 - Normal underscore-prefixed tools are not accidentally hidden.
 - Full suite passes.
+- Evidence: tool filtering/auth coverage remained green in the final suite; grep checks also confirmed no `startswith("_")` blanket hiding remains.
 
 ## Phase 4a - Service Discovery And Hub Registration
 
@@ -577,12 +591,13 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Phase 4a checkpoint:
+Phase 4a checkpoint: COMPLETE (validated 2026-05-16)
 
 - Hub registration is automatic when the reserved tool is present.
 - Non-hub services continue to work.
 - Version mismatch and rejection paths are tested.
 - Full suite passes.
+- Evidence: registration round-trip coverage is part of the final green suite; see `tmp/full_suite_final.txt`.
 
 ## Phase 4b - Registry Capability Surfacing
 
@@ -625,11 +640,12 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Phase 4b checkpoint:
+Phase 4b checkpoint: COMPLETE (validated 2026-05-16)
 
 - Operators can see hub capability status.
 - No secret leaks through service listing.
 - Full suite passes.
+- Evidence: `list_services` hub capability/no-token assertions remained green in the final suite; see `tmp/full_suite_final.txt`.
 
 ## Phase 5 - Fixture Producer Support
 
@@ -680,12 +696,13 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Phase 5 checkpoint:
+Phase 5 checkpoint: COMPLETE (validated 2026-05-16)
 
 - OHLCV producer returns descriptor only.
 - Hub owns the payload and authoritative metadata.
 - Oversize and missing-token paths are tested.
 - Full suite passes.
+- Evidence: producer descriptor coverage remained green in the final suite; the manual smoke run also showed descriptor-only producer output in `tmp/fixture_chat_final.txt`.
 
 ## Phase 6 - Fixture Consumer Support
 
@@ -733,11 +750,12 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Phase 6 checkpoint:
+Phase 6 checkpoint: COMPLETE (validated 2026-05-16)
 
 - Analytics tools work from descriptors.
 - Tampering advisory fields does not affect trust decisions.
 - Full suite passes.
+- Evidence: analytics descriptor-consumer and negative-path coverage remained green in the final suite; see `tmp/full_suite_final.txt`.
 
 ## Phase 7 - Agent Orchestration Contract Update
 
@@ -797,11 +815,12 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Phase 7 checkpoint:
+Phase 7 checkpoint: COMPLETE (validated 2026-05-16)
 
 - The model is guided to pass descriptors, not payloads.
 - Descriptor-enabled tools no longer get hidden payload substitution.
 - Full suite passes.
+- Evidence: descriptor passthrough/system-prompt coverage remained green in the final suite; see `tmp/full_suite_final.txt`.
 
 ## Phase 8 - End-to-end Workflow Validation And Negative Paths
 
@@ -868,15 +887,16 @@ Validation commands:
 Developer post-step (not CI-gated):
 
 ```
-uv run python scripts/fixture_chat.py --verbose --max-steps 40 --once "Using downstream tools only, calculate AAPL simple return, 30-day historical volatility, and max drawdown from 2026-04-01 to 2026-05-13. If an analytics tool requires bars, fetch OHLCV history first. Return compact JSON with ticker, from_date, to_date, simple_return, annualised_vol, max_drawdown_pct."
+uv run python scripts/fixture_chat.py --model fixture-descriptor-smoke --verbose --once "Using downstream tools only, calculate AAPL simple return, 30-day historical volatility, and max drawdown from 2026-04-01 to 2026-05-13."
 ```
 
-Phase 8 checkpoint:
+Phase 8 checkpoint: COMPLETE (validated 2026-05-16)
 
 - End-to-end descriptor workflow works.
 - Negative paths prove the design boundaries.
 - No large payload reaches model context.
 - Full suite and fixture chat pass.
+- Evidence: `tmp/fixture_chat_final.txt` shows `_store_result`, descriptor-only producer output, analytics `bars_ref` handoff, and `_get_result` fetches; `tmp/full_suite_final.txt` is green.
 
 ## Post-Implementation Review Remediation Gate
 
@@ -926,13 +946,14 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Review remediation checkpoint:
+Review remediation checkpoint: COMPLETE (validated 2026-05-16)
 
 - Shutdown robustness is implemented in production code, not only test cleanup.
 - Targeted test invocations stay targeted for file paths and pytest node IDs.
 - Hub storage limits cover payload and advisory metadata.
 - The AAPL descriptor workflow test matches the requested 30-day calculation.
 - Full suite passes after the remediations.
+- Evidence: `tmp/remediation_slice.txt`, `tmp/nodeid_after_fix.txt`, and the final `tmp/full_suite_final.txt` run all passed.
 
 ## Phase 9 - Documentation And Cleanup
 
@@ -986,13 +1007,16 @@ Validation commands:
 ./scripts/run_tests.sh -v
 ```
 
-Phase 9 checkpoint:
+Phase 9 checkpoint: COMPLETE (validated 2026-05-16)
 
 - Docs and examples match the final implementation.
 - No temporary spike-only behaviour remains.
 - Full suite passes.
+- Evidence: grep checks were clean, `./scripts/run_tests.sh --quality` passed into `tmp/quality_final.txt`, and the final suite passed into `tmp/full_suite_final.txt`.
 
 ## Final Acceptance Checklist
+
+Final acceptance status: COMPLETE (validated 2026-05-16).
 
 Before reporting completion, verify all of the following:
 

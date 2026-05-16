@@ -193,6 +193,23 @@ RUN_ALL=false
 STOP_ONLY=false
 CLEANUP_ONLY=false
 PYTEST_ARGS=()
+PYTEST_HAS_TARGET=false
+
+pytest_target_path() {
+    local arg="$1"
+    local path_part=""
+
+    if [[ "$arg" == -* ]]; then
+        return 1
+    fi
+
+    path_part="${arg%%::*}"
+    if [[ -e "$path_part" ]]; then
+        printf '%s\n' "$path_part"
+        return 0
+    fi
+    return 1
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -278,6 +295,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+for arg in "${PYTEST_ARGS[@]}"; do
+    if pytest_target_path "$arg" >/dev/null; then
+        PYTEST_HAS_TARGET=true
+        break
+    fi
+done
+
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
@@ -322,6 +346,16 @@ fi
 echo -e "${GREEN}=== Running Tests ===${NC}"
 set +e
 TEST_EXIT_CODE=0
+PYTEST_IMPORT_MODE=(--import-mode=importlib)
+
+pytest_args_have_target() {
+    for arg in "$@"; do
+        if pytest_target_path "$arg" >/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 run_quality_gate() {
     echo -e "${BLUE}--- Code Quality Gate (ruff + pyright + bandit) ---${NC}"
@@ -332,10 +366,14 @@ run_unit_tests() {
     # Optional args: specific test file(s) to run; defaults to the full unit/ directory.
     if [ $# -gt 0 ]; then
         echo -e "${BLUE}--- Unit Tests: $* ---${NC}"
-        uv run python -m pytest "$@" -v ${COVERAGE_ARGS}
+        if pytest_args_have_target "$@"; then
+            uv run python -m pytest "${PYTEST_IMPORT_MODE[@]}" "$@" -v ${COVERAGE_ARGS}
+        else
+            uv run python -m pytest "${PYTEST_IMPORT_MODE[@]}" "${TEST_DIR}/unit/" "$@" -v ${COVERAGE_ARGS}
+        fi
     else
         echo -e "${BLUE}--- Unit Tests ---${NC}"
-        uv run python -m pytest "${TEST_DIR}/unit/" -v ${COVERAGE_ARGS}
+        uv run python -m pytest "${PYTEST_IMPORT_MODE[@]}" "${TEST_DIR}/unit/" -v ${COVERAGE_ARGS}
     fi
 }
 
@@ -343,10 +381,14 @@ run_integration_tests() {
     # Optional args: specific test file(s) to run; defaults to the full integration/ directory.
     if [ $# -gt 0 ]; then
         echo -e "${BLUE}--- Integration Tests: $* ---${NC}"
-        uv run python -m pytest "$@" -v ${COVERAGE_ARGS}
+        if pytest_args_have_target "$@"; then
+            uv run python -m pytest "${PYTEST_IMPORT_MODE[@]}" "$@" -v ${COVERAGE_ARGS}
+        else
+            uv run python -m pytest "${PYTEST_IMPORT_MODE[@]}" "${TEST_DIR}/integration/" "$@" -v ${COVERAGE_ARGS}
+        fi
     else
         echo -e "${BLUE}--- Integration Tests ---${NC}"
-        uv run python -m pytest "${TEST_DIR}/integration/" -v ${COVERAGE_ARGS}
+        uv run python -m pytest "${PYTEST_IMPORT_MODE[@]}" "${TEST_DIR}/integration/" -v ${COVERAGE_ARGS}
     fi
 }
 
@@ -450,6 +492,30 @@ elif [ ${#PYTEST_ARGS[@]} -eq 0 ]; then
         fi
     fi
 
+elif [ "$PYTEST_HAS_TARGET" = false ]; then
+    # Option-only pytest arguments should still run the normal stepwise suite.
+    echo -e "${BLUE}Step 1/3: Code quality gate...${NC}"
+    run_quality_gate
+    QUALITY_EXIT=$?
+    if [ $QUALITY_EXIT -ne 0 ]; then
+        echo -e "${RED}Code quality gate failed — fix issues before running further tests${NC}"
+        TEST_EXIT_CODE=$QUALITY_EXIT
+    else
+        echo ""
+        echo -e "${BLUE}Step 2/3: Unit tests...${NC}"
+        run_unit_tests "${PYTEST_ARGS[@]}"
+        UNIT_EXIT=$?
+        if [ $UNIT_EXIT -ne 0 ]; then
+            echo -e "${RED}Unit tests failed${NC}"
+            TEST_EXIT_CODE=$UNIT_EXIT
+        else
+            echo ""
+            echo -e "${BLUE}Step 3/3: Integration tests...${NC}"
+            run_integration_tests "${PYTEST_ARGS[@]}"
+            TEST_EXIT_CODE=$?
+        fi
+    fi
+
 else
     # Custom pytest arguments: quality gate first, then targeted run.
     run_quality_gate
@@ -459,7 +525,7 @@ else
         TEST_EXIT_CODE=$QUALITY_EXIT
     else
         echo ""
-        uv run python -m pytest "${PYTEST_ARGS[@]}" ${COVERAGE_ARGS}
+        uv run python -m pytest "${PYTEST_IMPORT_MODE[@]}" "${PYTEST_ARGS[@]}" ${COVERAGE_ARGS}
         TEST_EXIT_CODE=$?
     fi
 fi

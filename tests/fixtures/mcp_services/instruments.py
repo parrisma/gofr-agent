@@ -11,6 +11,17 @@ import csv
 from mcp.server.fastmcp import FastMCP
 
 from tests.fixtures.mcp_services._data_loader import DATA_DIR, csv_table
+from tests.fixtures.mcp_services._results_hub import (
+    ResultsHubState,
+    register_results_hub,
+    store_result_via_hub,
+)
+from tests.fixtures.mcp_services._results_hub import (
+    configure_results_hub_auth as _configure_results_hub_auth,
+)
+from tests.fixtures.mcp_services._results_hub import (
+    reset_results_hub_state as _reset_results_hub_state,
+)
 from tests.fixtures.mcp_services._server import _require_bearer
 
 # ---------------------------------------------------------------------------
@@ -30,6 +41,11 @@ def _load_ohlcv() -> dict[str, list[dict]]:
 
 
 _OHLCV: dict[str, list[dict]] = _load_ohlcv()
+_RESULTS_HUB = ResultsHubState()
+
+
+def configure_results_hub_auth(callback_token: str | None) -> None:
+    _configure_results_hub_auth(_RESULTS_HUB, callback_token)
 
 # ---------------------------------------------------------------------------
 # FastMCP instance
@@ -129,7 +145,7 @@ def list_instruments(exchange: str | None = None) -> list[dict]:
 
 
 @mcp.tool()
-def get_ohlcv_history(ticker: str, from_date: str, to_date: str) -> list[dict]:
+async def get_ohlcv_history(ticker: str, from_date: str, to_date: str) -> list[dict] | dict:
     """Return daily OHLCV bars for an instrument over a date range (inclusive).
 
     Returns bars in ascending date order. Returns [] for unknown tickers or empty ranges.
@@ -148,7 +164,54 @@ def get_ohlcv_history(ticker: str, from_date: str, to_date: str) -> list[dict]:
         for b in bars
         if from_date <= b["date"] <= to_date
     ]
-    return sorted(result, key=lambda b: b["date"])
+    sorted_result = sorted(result, key=lambda b: b["date"])
+    if _RESULTS_HUB.hub_url is None:
+        return sorted_result
+    return await store_result_via_hub(
+        _RESULTS_HUB,
+        producer_service="instruments",
+        producer_tool="get_ohlcv_history",
+        result_type="ohlcv_bars",
+        schema_id="gofr.ohlcv_bars.v1",
+        payload=sorted_result,
+        summary=f"{len(sorted_result)} OHLCV bars for {ticker.upper()}",
+        source_args={
+            "ticker": ticker.upper(),
+            "from_date": from_date,
+            "to_date": to_date,
+        },
+        ttl_seconds=None,
+    )
+
+
+@mcp.tool(name="_register_results_hub")
+def _register_results_hub(
+    protocol_version: int,
+    hub_service: str,
+    hub_url: str,
+    store_tool: str,
+    fetch_tool: str,
+    describe_tool: str,
+    default_ttl_seconds: int,
+    max_payload_bytes: int,
+    descriptor_kind: str,
+) -> dict:
+    _require_bearer()
+    return register_results_hub(
+        _RESULTS_HUB,
+        protocol_version=protocol_version,
+        hub_service=hub_service,
+        hub_url=hub_url,
+        store_tool=store_tool,
+        fetch_tool=fetch_tool,
+        describe_tool=describe_tool,
+        default_ttl_seconds=default_ttl_seconds,
+        max_payload_bytes=max_payload_bytes,
+        descriptor_kind=descriptor_kind,
+        can_publish=True,
+        can_consume=True,
+        result_types=("ohlcv_bars",),
+    )
 
 
 @mcp.tool()
@@ -220,3 +283,7 @@ def validate_market_code(ticker: str, exchange: str) -> dict:
         "primary_exchange": primary,
         "is_match": primary == exchange.upper(),
     }
+
+
+def reset_results_hub_state() -> None:
+    _reset_results_hub_state(_RESULTS_HUB)

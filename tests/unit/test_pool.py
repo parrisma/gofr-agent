@@ -145,6 +145,24 @@ class TestSessionPoolStop:
         assert pool._reconnect_tasks == []
         await pool.stop()
 
+    async def test_stop_suppresses_cancelled_transport_shutdown(self) -> None:
+        pool = SessionPool(_make_service(), pool_size=1)
+        pool._slots[0] = _make_fake_session()
+
+        transport_cm = MagicMock()
+        transport_cm.__aexit__ = AsyncMock(side_effect=asyncio.CancelledError())
+        session_cm = MagicMock()
+        session_cm.__aexit__ = AsyncMock(side_effect=asyncio.CancelledError())
+
+        pool._transport_cms[0] = transport_cm
+        pool._session_cms[0] = session_cm
+
+        await pool.stop()
+
+        assert pool._slots == [None]
+        assert pool._session_cms == [None]
+        assert pool._transport_cms == [None]
+
 
 class TestSessionPoolOpenSlot:
     """Unit tests for the actual MCP client setup in _open_slot."""

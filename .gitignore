@@ -69,13 +69,39 @@ data/auth/
 data/sessions/
 data/storage/
 secrets/
+certs/
+certificates/
 *.pem
 *.key
 *.p12
 *.pfx
 *.jks
+*.keystore
+*.kdbx
 *.crt
 *.cer
+*.csr
+*.der
+*.p7b
+*.p7c
+*.p8
+*.pk8
+*.mobileprovision
+*.provisionprofile
+*.ovpn
+.vault-token
+.netrc
+.envrc
+.direnv/
+*.credentials
+*.creds
+*.secret
+*.secrets
+*.sqlite
+*.sqlite3
+*.db
+*.db-*
+*.dump
 .jwt_secret
 vault_*
 *.token
@@ -83,6 +109,7 @@ vault_*
 
 # ── Runtime data ──────────────────────────────────────────────────────────────
 logs/
+/tmp/
 *.log
 *.log.*
 

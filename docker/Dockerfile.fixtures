@@ -38,6 +38,10 @@ COPY tests/__init__.py                         tests/__init__.py
 COPY tests/fixtures/__init__.py                tests/fixtures/__init__.py
 COPY tests/fixtures/mcp_services/              tests/fixtures/mcp_services/
 
+# Hub-aware fixture services import these protocol models.
+COPY app/__init__.py                           app/__init__.py
+COPY app/hub/                                  app/hub/
+
 # ── Launcher ──────────────────────────────────────────────────────────────────
 COPY docker/mcp_fixtures/serve.py  docker/mcp_fixtures/serve.py
 

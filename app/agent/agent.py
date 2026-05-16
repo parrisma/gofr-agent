@@ -33,7 +33,7 @@ from app.agent.events import (
     ToolRetryEvent,
 )
 from app.agent.system_prompt import build_system_prompt
-from app.agent.tool_factory import make_tool
+from app.agent.tool_factory import make_tool, model_visible_tools
 from app.auth.auth_service import AuthService
 from app.config import GofrAgentConfig
 from app.logger import get_logger
@@ -44,6 +44,13 @@ from app.sessions.store import Session
 logger = get_logger("gofr-agent.agent")
 _TOOL_DATA_START = "<<BEGIN_TOOL_DATA>>\n"
 _TOOL_DATA_END = "\n<<END_TOOL_DATA>>"
+
+
+def _exception_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    if message:
+        return message
+    return f"{type(exc).__name__} raised without a message"
 
 
 @dataclass
@@ -85,6 +92,7 @@ class GofrAgent:
 
     def build(self) -> None:
         """Construct the underlying pydantic-ai Agent from the current registry."""
+        visible_tool_infos = model_visible_tools(self._registry.all_tools)
         tools = [
             make_tool(
                 pool,
@@ -93,13 +101,13 @@ class GofrAgent:
                 max_chars=self._config.tool_result_max_chars,
                 retry_attempts=self._config.tool_retry_attempts,
             )
-            for info in self._registry.all_tools
+            for info in visible_tool_infos
             for pool in [self._registry.get_pool(info.service_name)]
             if pool is not None
         ]
         system_prompt = build_system_prompt(
             list(self._registry.all_service_configs),
-            self._registry.all_tools,
+            visible_tool_infos,
         )
         model = self._model_override or self._config.llm_model
         self._agent = Agent(
@@ -342,14 +350,30 @@ class GofrAgent:
                 new_messages = agent_run.new_messages()
                 usage = agent_run.usage()
         except Exception as exc:
+            error_message = _exception_message(exc)
+            if isinstance(exc, TimeoutError) and not str(exc).strip():
+                error_message = (
+                    f"Agent run timed out after {self._config.agent_timeout_seconds} seconds"
+                )
+            logger.error(
+                "Agent run failed",
+                session_id=session.session_id,
+                error_class=type(exc).__name__,
+                error_message=error_message,
+                **request_log_fields(),
+            )
             await event_sink.emit(
                 RunFailedEvent(
                     request_id=request_id,
                     session_id=session.session_id,
-                    error=str(exc),
+                    error=error_message,
                     fatal=True,
                 )
             )
+            if isinstance(exc, TimeoutError) and not str(exc).strip():
+                raise TimeoutError(error_message) from exc
+            if not str(exc).strip():
+                raise RuntimeError(error_message) from exc
             raise
 
         summary_update: str | None = None

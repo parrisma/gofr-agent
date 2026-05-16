@@ -1,7 +1,9 @@
 """Tests for gofr-agent port registration in gofr-common and GofrAgentConfig."""
 
+import pytest
 from gofr_common.config import GOFR_AGENT_PORTS, load_ports
 from gofr_common.config.ports import reset_ports_cache
+from pydantic import ValidationError
 
 from app.config import GofrAgentConfig
 
@@ -64,6 +66,12 @@ class TestGofrAgentConfig:
         assert cfg.dynamic_registration_enabled is False
         assert cfg.allowed_service_hosts == []
         assert cfg.allowed_models == []
+        assert cfg.hub_enabled is False
+        assert cfg.hub_url is None
+        assert cfg.hub_default_ttl_seconds > 0
+        assert cfg.hub_max_payload_bytes > 0
+        assert cfg.hub_max_results > 0
+        assert cfg.hub_protocol_version == 1
         assert cfg.log_level == "INFO"
 
     def test_from_env_all_vars(self) -> None:
@@ -87,6 +95,12 @@ class TestGofrAgentConfig:
             "GOFR_AGENT_DYNAMIC_REGISTRATION_ENABLED": "true",
             "GOFR_AGENT_ALLOWED_SERVICE_HOSTS": "gofr-*,example.internal",
             "GOFR_AGENT_ALLOWED_MODELS": "openai:gpt-4o-mini,deepseek/deepseek-v4-pro",
+            "GOFR_AGENT_HUB_ENABLED": "true",
+            "GOFR_AGENT_HUB_URL": "http://gofr-agent:8090/mcp",
+            "GOFR_AGENT_HUB_DEFAULT_TTL_SECONDS": "1800",
+            "GOFR_AGENT_HUB_MAX_PAYLOAD_BYTES": "524288",
+            "GOFR_AGENT_HUB_MAX_RESULTS": "250",
+            "GOFR_AGENT_HUB_PROTOCOL_VERSION": "1",
             "GOFR_AGENT_LOG_LEVEL": "DEBUG",
         }
         cfg = GofrAgentConfig.from_env(env=env)
@@ -109,4 +123,51 @@ class TestGofrAgentConfig:
         assert cfg.dynamic_registration_enabled is True
         assert cfg.allowed_service_hosts == ["gofr-*", "example.internal"]
         assert cfg.allowed_models == ["openai:gpt-4o-mini", "deepseek/deepseek-v4-pro"]
+        assert cfg.hub_enabled is True
+        assert cfg.hub_url == "http://gofr-agent:8090/mcp"
+        assert cfg.hub_default_ttl_seconds == 1800
+        assert cfg.hub_max_payload_bytes == 524288
+        assert cfg.hub_max_results == 250
+        assert cfg.hub_protocol_version == 1
         assert cfg.log_level == "DEBUG"
+
+    def test_hub_enabled_requires_hub_url(self) -> None:
+        with pytest.raises(ValidationError, match="hub_url"):
+            GofrAgentConfig.from_env(env={"GOFR_AGENT_HUB_ENABLED": "true"})
+
+    @pytest.mark.parametrize(
+        "hub_url",
+        [
+            "http://localhost:8090/mcp",
+            "http://127.0.0.1:8090/mcp",
+            "http://[::1]:8090/mcp",
+        ],
+    )
+    def test_hub_url_rejects_loopback_hosts(self, hub_url: str) -> None:
+        with pytest.raises(ValidationError, match="hub_url"):
+            GofrAgentConfig.from_env(
+                env={
+                    "GOFR_AGENT_HUB_ENABLED": "true",
+                    "GOFR_AGENT_HUB_URL": hub_url,
+                }
+            )
+
+    def test_hub_url_accepts_docker_service_name(self) -> None:
+        cfg = GofrAgentConfig.from_env(
+            env={
+                "GOFR_AGENT_HUB_ENABLED": "true",
+                "GOFR_AGENT_HUB_URL": "http://gofr-agent:8090/mcp",
+            }
+        )
+
+        assert cfg.hub_url == "http://gofr-agent:8090/mcp"
+
+    def test_hub_url_accepts_https_dns_name(self) -> None:
+        cfg = GofrAgentConfig.from_env(
+            env={
+                "GOFR_AGENT_HUB_ENABLED": "true",
+                "GOFR_AGENT_HUB_URL": "https://agent.example.internal/mcp",
+            }
+        )
+
+        assert cfg.hub_url == "https://agent.example.internal/mcp"

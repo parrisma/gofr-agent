@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.agent.system_prompt import build_system_prompt
+from app.agent.tool_factory import model_visible_tools
 from app.services import ServiceConfig
 from app.services.discovery import MCPToolInfo
 
@@ -16,12 +17,15 @@ def _tool(
     svc: str,
     desc: str = "Does something",
     input_schema: dict | None = None,
+    *,
+    model_visible: bool = True,
 ) -> MCPToolInfo:
     return MCPToolInfo(
         name=name,
         description=desc,
         input_schema=input_schema or {},
         service_name=svc,
+        model_visible=model_visible,
     )
 
 
@@ -97,3 +101,51 @@ class TestBuildSystemPrompt:
         assert "Required args: `ticker`, `bars`." in prompt
         assert "Optional args: `window`." in prompt
         assert "fetch OHLCV bars first" in prompt
+
+    def test_descriptor_guidance_is_included(self) -> None:
+        prompt = build_system_prompt(
+            [_svc("analytics")],
+            [
+                _tool(
+                    "simple_return",
+                    "analytics",
+                    desc="Compute simple return from a descriptor-backed bars result.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string"},
+                            "bars_ref": {
+                                "type": "object",
+                                "x-gofr-result-descriptor": True,
+                            },
+                        },
+                        "required": ["ticker", "bars_ref"],
+                    },
+                )
+            ],
+        )
+
+        assert "descriptor object verbatim" in prompt.lower()
+        assert "Descriptor args: `bars_ref`." in prompt
+        assert "do not expand them into raw payloads" in prompt
+
+    def test_reserved_protocol_tools_hidden_via_factory_filter(self) -> None:
+        tool_infos = model_visible_tools(
+            [
+                _tool("_register_results_hub", "fixture"),
+                _tool("_store_result", "fixture"),
+                _tool("_get_result", "fixture"),
+                _tool("_describe_result", "fixture"),
+                _tool("_debug_status", "fixture"),
+                _tool("fetch_prices", "fixture"),
+            ]
+        )
+
+        prompt = build_system_prompt([_svc("fixture")], tool_infos)
+
+        assert "fixture___register_results_hub" not in prompt
+        assert "fixture___store_result" not in prompt
+        assert "fixture___get_result" not in prompt
+        assert "fixture___describe_result" not in prompt
+        assert "fixture___debug_status" in prompt
+        assert "fixture__fetch_prices" in prompt

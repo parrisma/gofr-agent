@@ -27,6 +27,27 @@ _URL_RE = re.compile(r"https?://\S+")
 _TOOL_DATA_START = "<<BEGIN_TOOL_DATA>>"
 _TOOL_DATA_END = "<<END_TOOL_DATA>>"
 _DEFAULT_INPUT_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
+_DESCRIPTOR_SCHEMA_FLAG = "x-gofr-result-descriptor"
+RESERVED_PROTOCOL_TOOLS = frozenset(
+    {
+        "_register_results_hub",
+        "_store_result",
+        "_get_result",
+        "_describe_result",
+    }
+)
+
+
+def is_model_visible_tool(info: MCPToolInfo) -> bool:
+    """Return whether a discovered tool should be exposed to the model."""
+
+    return info.model_visible and info.name not in RESERVED_PROTOCOL_TOOLS
+
+
+def model_visible_tools(tool_infos: list[MCPToolInfo]) -> list[MCPToolInfo]:
+    """Return the subset of discovered tools that are safe for model use."""
+
+    return [info for info in tool_infos if is_model_visible_tool(info)]
 
 
 def _token_from_deps(deps: AgentDeps | str) -> str:
@@ -85,6 +106,10 @@ def _property_schema(schema: dict[str, Any], name: str) -> dict[str, Any]:
     return prop_schema if isinstance(prop_schema, dict) else {}
 
 
+def _is_descriptor_property(schema: dict[str, Any]) -> bool:
+    return schema.get(_DESCRIPTOR_SCHEMA_FLAG) is True
+
+
 def _schema_type(schema: dict[str, Any]) -> str:
     schema_type = schema.get("type")
     return schema_type if isinstance(schema_type, str) else ""
@@ -135,10 +160,22 @@ def _enrich_missing_args(
     for name in _required_arg_names(schema):
         if name in enriched:
             continue
-        candidate = _candidate_for_missing_arg(deps, name, _property_schema(schema, name))
+        prop_schema = _property_schema(schema, name)
+        if _is_descriptor_property(prop_schema):
+            continue
+        candidate = _candidate_for_missing_arg(deps, name, prop_schema)
         if candidate is not None:
             enriched[name] = candidate
     return enriched
+
+
+def _missing_required_descriptor_arg(schema: dict[str, Any], args: dict[str, Any]) -> str | None:
+    for name in _required_arg_names(schema):
+        if name in args:
+            continue
+        if _is_descriptor_property(_property_schema(schema, name)):
+            return name
+    return None
 
 
 def _json_value_from_text(text: str) -> Any:
@@ -342,6 +379,12 @@ def make_tool(
 
     async def _validate_arguments(ctx: RunContext[AgentDeps | str], **kwargs: Any) -> None:
         enriched = _enrich_missing_args(ctx.deps, input_schema, kwargs)
+        missing_descriptor_arg = _missing_required_descriptor_arg(input_schema, enriched)
+        if missing_descriptor_arg is not None:
+            raise ModelRetry(
+                f"Tool {tool_name} requires descriptor argument {missing_descriptor_arg}; "
+                "pass it directly from the previous tool's response."
+            )
         try:
             schema_validator.validate(enriched)
         except JsonSchemaValidationError as exc:

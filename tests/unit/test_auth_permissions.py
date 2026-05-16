@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from app.auth._dev_auth_service import DevAuthService
 from app.auth.auth_service import FailClosedAuthService
 from app.auth.permissions import (
     AGENT_ASK,
+    AGENT_HUB_FETCH,
+    AGENT_HUB_REGISTER,
+    AGENT_HUB_STORE,
     AGENT_LIST_SERVICES,
     AGENT_MODEL_OVERRIDE,
     AGENT_PING,
@@ -33,6 +37,9 @@ class TestActivityConstants:
             AGENT_RESET_SESSION,
             AGENT_REGISTER_SERVICE,
             AGENT_REFRESH_SERVICES,
+            AGENT_HUB_STORE,
+            AGENT_HUB_FETCH,
+            AGENT_HUB_REGISTER,
         }
         assert set(ALL_ACTIVITIES) == expected
 
@@ -44,6 +51,30 @@ class TestActivityConstants:
         assert AGENT_RESET_SESSION == "GoFRAgentResetSession"
         assert AGENT_REGISTER_SERVICE == "GoFRAgentRegisterService"
         assert AGENT_REFRESH_SERVICES == "GoFRAgentRefreshServices"
+        assert AGENT_HUB_STORE == "GoFRAgentHubStore"
+        assert AGENT_HUB_FETCH == "GoFRAgentHubFetch"
+        assert AGENT_HUB_REGISTER == "GoFRAgentHubRegister"
+
+
+class TestDevAuthServiceHubTokens:
+    def test_existing_tokens_do_not_grant_hub_activities(self) -> None:
+        service = DevAuthService()
+
+        assert AGENT_HUB_STORE not in parse_authorised_activities(
+            service.authorised_activities("dev-admin-token")
+        )
+        assert AGENT_HUB_FETCH not in parse_authorised_activities(
+            service.authorised_activities("dev-read-token")
+        )
+
+    def test_fixture_hub_token_grants_only_hub_store_and_fetch(self) -> None:
+        service = DevAuthService()
+
+        activities = parse_authorised_activities(
+            service.authorised_activities("dev-fixtures-hub-token")
+        )
+
+        assert activities == {AGENT_HUB_STORE, AGENT_HUB_FETCH}
 
 
 class TestParseAuthorisedActivities:

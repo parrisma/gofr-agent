@@ -188,14 +188,14 @@ class TestListServices:
         with _auth_context():
             result = await _call_tool(mcp, "list_services")
 
-        assert result == [
-            {
-                "name": "broken",
-                "status": "failed",
-                "tools": [],
-                "error": "probe failed",
-            }
-        ]
+        assert len(result) == 1
+        assert result[0]["name"] == "broken"
+        assert result[0]["url"] == "http://broken/mcp"
+        assert result[0]["status"] == "failed"
+        assert result[0]["tools"] == []
+        assert result[0]["error"] == "probe failed"
+        assert "token" not in result[0]
+        assert "hub_callback_token" not in result[0]
 
 
 class TestAsk:

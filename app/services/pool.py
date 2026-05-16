@@ -15,8 +15,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 from app.exceptions import AuthTokenInvalidError, ServiceConnectionError
 from app.logger import get_logger
@@ -26,6 +27,19 @@ from app.services import ServiceConfig
 logger = get_logger("gofr-agent.pool")
 
 _RECONNECT_DELAYS = [1, 2, 4, 8, 16, 32, 60]  # seconds, capped at 60
+
+
+@asynccontextmanager
+async def streamablehttp_client(
+    url: str,
+    headers: dict[str, str] | None = None,
+) -> AsyncIterator[tuple[Any, Any, Any]]:
+    """Compatibility wrapper around the current MCP Streamable HTTP client."""
+    async with (
+        httpx.AsyncClient(headers=headers) as http_client,
+        streamable_http_client(url, http_client=http_client) as streams,
+    ):
+        yield streams
 
 
 class SessionPool:
@@ -49,21 +63,25 @@ class SessionPool:
 
     async def start(self) -> None:
         """Open all pool slots concurrently."""
-        await asyncio.gather(*(self._open_slot(i) for i in range(self._pool_size)))
+        for index in range(self._pool_size):
+            await self._open_slot(index)
 
     async def stop(self) -> None:
         """Close all slots and cancel reconnect tasks."""
         self._stopped = True
-        for task in self._reconnect_tasks:
+        reconnect_tasks = list(self._reconnect_tasks)
+        for task in reconnect_tasks:
             task.cancel()
+        if reconnect_tasks:
+            await asyncio.gather(*reconnect_tasks, return_exceptions=True)
         self._reconnect_tasks.clear()
 
         async with self._lock:
             for i in range(self._pool_size):
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     if self._session_cms[i] is not None:
                         await self._session_cms[i].__aexit__(None, None, None)
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     if self._transport_cms[i] is not None:
                         await self._transport_cms[i].__aexit__(None, None, None)
                 self._slots[i] = None

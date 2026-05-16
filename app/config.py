@@ -7,9 +7,11 @@ All fields have safe defaults so the server can be started with minimal config.
 from __future__ import annotations
 
 import os
+from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class GofrAgentConfig(BaseModel):
@@ -50,9 +52,44 @@ class GofrAgentConfig(BaseModel):
     dynamic_registration_enabled: bool = False
     allowed_service_hosts: list[str] = Field(default_factory=list)
     allowed_models: list[str] = Field(default_factory=list)
+    hub_enabled: bool = False
+    hub_url: str | None = None
+    hub_default_ttl_seconds: int = Field(default=3600, ge=1)
+    hub_max_payload_bytes: int = Field(default=524288, ge=1)
+    hub_max_results: int = Field(default=256, ge=1)
+    hub_protocol_version: int = Field(default=1, ge=1)
 
     # Logging
     log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def _validate_hub_settings(self) -> GofrAgentConfig:
+        if not self.hub_enabled:
+            return self
+
+        if not self.hub_url:
+            raise ValueError("hub_url must be set when hub_enabled is true")
+
+        parsed = urlsplit(self.hub_url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("hub_url must use http or https")
+        if not parsed.hostname:
+            raise ValueError("hub_url must include a hostname")
+
+        hostname = parsed.hostname.lower()
+        if hostname == "localhost":
+            raise ValueError("hub_url must not use localhost when hub is enabled")
+
+        try:
+            if ip_address(hostname).is_loopback:
+                raise ValueError(
+                    "hub_url must not use a loopback host when hub is enabled"
+                )
+        except ValueError as exc:
+            if "loopback" in str(exc):
+                raise
+
+        return self
 
     @classmethod
     def from_env(
@@ -109,6 +146,12 @@ class GofrAgentConfig(BaseModel):
             ),
             allowed_service_hosts=_get_list("ALLOWED_SERVICE_HOSTS"),
             allowed_models=_get_list("ALLOWED_MODELS"),
+            hub_enabled=_get_bool("HUB_ENABLED", False),
+            hub_url=_get("HUB_URL") or None,
+            hub_default_ttl_seconds=int(_get("HUB_DEFAULT_TTL_SECONDS", "3600")),
+            hub_max_payload_bytes=int(_get("HUB_MAX_PAYLOAD_BYTES", "524288")),
+            hub_max_results=int(_get("HUB_MAX_RESULTS", "256")),
+            hub_protocol_version=int(_get("HUB_PROTOCOL_VERSION", "1")),
             log_level=_get("LOG_LEVEL", "INFO"),
         )
 

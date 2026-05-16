@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from app.auth import (
     AGENT_ASK,
+    AGENT_HUB_FETCH,
+    AGENT_HUB_REGISTER,
+    AGENT_HUB_STORE,
     AGENT_LIST_SERVICES,
     AGENT_MODEL_OVERRIDE,
     AGENT_PING,
@@ -41,9 +44,12 @@ class TestAuthPublicSurface:
         assert AGENT_RESET_SESSION == "GoFRAgentResetSession"
         assert AGENT_REGISTER_SERVICE == "GoFRAgentRegisterService"
         assert AGENT_REFRESH_SERVICES == "GoFRAgentRefreshServices"
+        assert AGENT_HUB_STORE == "GoFRAgentHubStore"
+        assert AGENT_HUB_FETCH == "GoFRAgentHubFetch"
+        assert AGENT_HUB_REGISTER == "GoFRAgentHubRegister"
 
     def test_all_activities_list(self) -> None:
-        assert len(ALL_ACTIVITIES) == 7
+        assert len(ALL_ACTIVITIES) == 10
 
     def test_helpers_callable(self) -> None:
         assert callable(downstream_activity)

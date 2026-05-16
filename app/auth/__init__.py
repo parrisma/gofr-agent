@@ -10,6 +10,9 @@ from __future__ import annotations
 from app.auth.auth_service import AuthService, FailClosedAuthService, get_auth_service
 from app.auth.permissions import (
     AGENT_ASK,
+    AGENT_HUB_FETCH,
+    AGENT_HUB_REGISTER,
+    AGENT_HUB_STORE,
     AGENT_LIST_SERVICES,
     AGENT_MODEL_OVERRIDE,
     AGENT_PING,
@@ -31,6 +34,9 @@ __all__ = [
     "get_auth_service",
     # permissions
     "AGENT_ASK",
+    "AGENT_HUB_FETCH",
+    "AGENT_HUB_REGISTER",
+    "AGENT_HUB_STORE",
     "AGENT_LIST_SERVICES",
     "AGENT_MODEL_OVERRIDE",
     "AGENT_PING",

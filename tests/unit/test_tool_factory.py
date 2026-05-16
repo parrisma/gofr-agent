@@ -13,7 +13,7 @@ from pydantic_ai import Tool
 from pydantic_ai.exceptions import ModelRetry, SkipToolValidation
 
 from app.agent.deps import AgentDeps
-from app.agent.tool_factory import make_tool, truncate_result
+from app.agent.tool_factory import make_tool, model_visible_tools, truncate_result
 from app.services.discovery import MCPToolInfo
 from app.services.pool import SessionPool
 from tests.helpers.dummy_auth_service import DummyAuthService
@@ -24,12 +24,15 @@ def _make_info(
     description: str = "Search things",
     service_name: str = "my-svc",
     input_schema: dict | None = None,
+    *,
+    model_visible: bool = True,
 ) -> MCPToolInfo:
     return MCPToolInfo(
         name=name,
         description=description,
         input_schema=input_schema or {},
         service_name=service_name,
+        model_visible=model_visible,
     )
 
 
@@ -87,6 +90,34 @@ class TestTruncateResult:
 
 
 class TestMakeTool:
+    def test_reserved_protocol_tools_are_hidden(self) -> None:
+        visible = model_visible_tools(
+            [
+                _make_info(name="_register_results_hub"),
+                _make_info(name="_store_result"),
+                _make_info(name="_get_result"),
+                _make_info(name="_describe_result"),
+                _make_info(name="search"),
+            ]
+        )
+
+        assert [tool.name for tool in visible] == ["search"]
+
+    def test_non_protocol_underscore_tool_remains_visible(self) -> None:
+        visible = model_visible_tools([_make_info(name="_debug_status")])
+
+        assert [tool.name for tool in visible] == ["_debug_status"]
+
+    def test_explicitly_hidden_tool_is_filtered(self) -> None:
+        visible = model_visible_tools(
+            [
+                _make_info(name="search", model_visible=False),
+                _make_info(name="read_doc"),
+            ]
+        )
+
+        assert [tool.name for tool in visible] == ["read_doc"]
+
     def test_tool_name_format(self) -> None:
         info = _make_info(name="get_doc", service_name="rag-svc")
         pool = _make_pool_with_session(MagicMock())
@@ -284,6 +315,129 @@ class TestMakeTool:
             await tool.args_validator(_ctx_with_deps(deps))
 
         assert exc_info.value.validated_args == {"ticker": "AAPL", "bars": bars}
+
+    async def test_missing_descriptor_arg_is_not_resolved_from_recent_artifact(self) -> None:
+        deps = AgentDeps(token="dev-admin-token")
+        deps.remember_tool_result(
+            service="instruments",
+            tool="get_ohlcv_history",
+            arguments={"ticker": "AAPL"},
+            value=[{"date": "2026-05-13", "close": 182.917}],
+        )
+        session = MagicMock()
+        session.call_tool = AsyncMock()
+        pool = _make_pool_with_session(session)
+        tool = make_tool(
+            pool,
+            _make_info(
+                name="simple_return",
+                service_name="analytics",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "ticker": {"type": "string"},
+                        "bars_ref": {
+                            "type": "object",
+                            "x-gofr-result-descriptor": True,
+                        },
+                    },
+                    "required": ["ticker", "bars_ref"],
+                },
+            ),
+            DummyAuthService(),
+        )
+
+        assert tool.args_validator is not None
+        with pytest.raises(ModelRetry, match="requires descriptor argument bars_ref"):
+            await tool.args_validator(_ctx_with_deps(deps))
+
+        session.call_tool.assert_not_called()
+
+    async def test_non_descriptor_args_still_enrich_when_descriptor_is_present(self) -> None:
+        descriptor = {
+            "kind": "gofr.result_ref",
+            "version": 1,
+            "result_guid": "guid-123",
+            "hub_service": "gofr-agent",
+        }
+        deps = AgentDeps(token="dev-admin-token")
+        deps.remember_tool_result(
+            service="instruments",
+            tool="get_ohlcv_history",
+            arguments={"ticker": "AAPL"},
+            value=descriptor,
+        )
+        session = MagicMock()
+        session.call_tool = AsyncMock()
+        pool = _make_pool_with_session(session)
+        tool = make_tool(
+            pool,
+            _make_info(
+                name="simple_return",
+                service_name="analytics",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "ticker": {"type": "string"},
+                        "bars_ref": {
+                            "type": "object",
+                            "x-gofr-result-descriptor": True,
+                        },
+                    },
+                    "required": ["ticker", "bars_ref"],
+                },
+            ),
+            DummyAuthService(),
+        )
+
+        assert tool.args_validator is not None
+        with pytest.raises(SkipToolValidation) as exc_info:
+            await tool.args_validator(_ctx_with_deps(deps), bars_ref=descriptor)
+
+        assert exc_info.value.validated_args == {
+            "ticker": "AAPL",
+            "bars_ref": descriptor,
+        }
+
+    async def test_tool_call_preserves_descriptor_argument_verbatim(self) -> None:
+        descriptor = {
+            "kind": "gofr.result_ref",
+            "version": 1,
+            "result_guid": "guid-123",
+            "hub_service": "gofr-agent",
+        }
+        content = TextContent(type="text", text='{"return_pct": 1.2}')
+        call_result = MagicMock()
+        call_result.content = [content]
+        session = MagicMock()
+        session.call_tool = AsyncMock(return_value=call_result)
+        pool = _make_pool_with_session(session)
+        tool = make_tool(
+            pool,
+            _make_info(
+                name="simple_return",
+                service_name="analytics",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "ticker": {"type": "string"},
+                        "bars_ref": {
+                            "type": "object",
+                            "x-gofr-result-descriptor": True,
+                        },
+                    },
+                    "required": ["ticker", "bars_ref"],
+                },
+            ),
+            DummyAuthService(),
+        )
+
+        await tool.function(_ctx(), ticker="AAPL", bars_ref=descriptor)
+
+        session.call_tool.assert_called_once_with(
+            "simple_return",
+            {"ticker": "AAPL", "bars_ref": descriptor},
+        )
 
     async def test_tool_call_uses_resolved_bars_from_recent_artifact(self) -> None:
         bars = [{"date": "2026-05-13", "close": 182.917}]

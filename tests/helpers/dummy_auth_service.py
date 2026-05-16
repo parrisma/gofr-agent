@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from app.auth.permissions import (
     AGENT_ASK,
+    AGENT_HUB_FETCH,
+    AGENT_HUB_STORE,
     AGENT_LIST_SERVICES,
     AGENT_MODEL_OVERRIDE,
     AGENT_PING,
@@ -28,10 +30,12 @@ _ALL = ",".join([
 ])
 
 _READ_ONLY = ",".join([AGENT_PING, AGENT_LIST_SERVICES, AGENT_ASK])
+_HUB_CALLBACK = ",".join([AGENT_HUB_STORE, AGENT_HUB_FETCH])
 
 _TOKEN_MAP: dict[str, str] = {
     "dev-admin-token": _ALL,
     "dev-read-token": _READ_ONLY,
+    "dev-fixtures-hub-token": _HUB_CALLBACK,
 }
 
 

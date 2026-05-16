@@ -15,7 +15,7 @@ from app.auth import ALL_ACTIVITIES
 from app.config import GofrAgentConfig
 from app.mcp_server.mcp_server import create_mcp_server
 from app.services import ServiceConfig, ServicesManifest
-from app.services.registry import ServiceRegistry
+from app.services.registry import ServiceHubCapabilities, ServiceRegistry
 from app.sessions.store import SessionStore
 from tests.integration.mock_mcp_server import _free_port
 
@@ -93,6 +93,41 @@ async def agent_server(mock_mcp_url: str) -> str:
     await registry.shutdown()
 
 
+@pytest.fixture()
+async def agent_server_with_hub_capabilities(mock_mcp_url: str) -> str:
+    """Start an in-process gofr-agent with explicit hub capability metadata."""
+    config = _config()
+    registry = ServiceRegistry(config)
+    await registry.load_manifest(_manifest(mock_mcp_url))
+    registry.record_hub_capabilities(
+        "mock",
+        ServiceHubCapabilities(
+            supports_results_hub=True,
+            can_publish_results=True,
+            can_consume_results=False,
+            result_types=("ohlcv_bars",),
+        ),
+    )
+    agent = GofrAgent(config, registry, _AllowAll())
+    agent.build()
+    session_store = SessionStore(ttl_minutes=60)
+
+    mcp = create_mcp_server(config, registry, agent, session_store, _AllowAll())
+    app = AuthHeaderMiddleware(mcp.streamable_http_app())
+
+    port = _free_port()
+    host = "127.0.0.1"
+    thread = _AgentServerThread(app, host, port)
+    thread.start()
+    thread.wait_ready()
+
+    yield f"http://{host}:{port}/mcp"  # type: ignore[misc]
+
+    thread.shutdown()
+    thread.join(timeout=5)
+    await registry.shutdown()
+
+
 _HEADERS = {"Authorization": "Bearer allow-all"}
 
 
@@ -126,6 +161,38 @@ class TestMCPServerIntegration:
         else:
             services = data
         assert any(s.get("name") == "mock" for s in services)
+
+    async def test_list_services_includes_hub_capabilities(
+        self,
+        agent_server_with_hub_capabilities: str,
+    ) -> None:
+        async with (
+            streamablehttp_client(agent_server_with_hub_capabilities, headers=_HEADERS) as (
+                read,
+                write,
+                _,
+            ),
+            ClientSession(read, write) as client,
+        ):
+            await client.initialize()
+            result = await client.call_tool("list_services", {})
+        import json
+
+        raw = result.content[0].text  # type: ignore[union-attr]
+        data = json.loads(raw)
+        services = (
+            data
+            if isinstance(data, list)
+            else data.get("services", data.get("result", [data]))
+        )
+        service = next(item for item in services if item.get("name") == "mock")
+
+        assert service["supports_results_hub"] is True
+        assert service["can_publish_results"] is True
+        assert service["can_consume_results"] is False
+        assert service["result_types"] == ["ohlcv_bars"]
+        assert "token" not in service
+        assert "hub_callback_token" not in service
 
     async def test_ask_tool_returns_answer(self, agent_server: str) -> None:
         async with (

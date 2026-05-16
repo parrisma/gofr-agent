@@ -17,6 +17,28 @@ class MCPToolInfo:
     description: str
     input_schema: dict  # type: ignore[type-arg]
     service_name: str
+    model_visible: bool = True
+
+
+def _tool_model_visible(tool: object) -> bool:
+    if getattr(tool, "name", None) == "_register_results_hub":
+        return False
+
+    direct = getattr(tool, "modelVisible", None)
+    if isinstance(direct, bool):
+        return direct
+
+    annotations = getattr(tool, "annotations", None)
+    if isinstance(annotations, dict):
+        annotated = annotations.get("modelVisible")
+        if isinstance(annotated, bool):
+            return annotated
+
+    annotated = getattr(annotations, "modelVisible", None)
+    if isinstance(annotated, bool):
+        return annotated
+
+    return True
 
 
 async def discover_tools(
@@ -49,6 +71,7 @@ async def discover_tools(
             description=tool.description or "",
             input_schema=tool.inputSchema if hasattr(tool, "inputSchema") else {},
             service_name=service.name,
+            model_visible=_tool_model_visible(tool),
         )
         for tool in result.tools
     ]

@@ -328,6 +328,9 @@ uv run python scripts/fixture_chat.py --max-steps 25 --once "For Meridian Capita
 # Install dependencies
 uv sync
 
+# Install the local git pre-commit hooks
+uv run pre-commit install
+
 # Run quality gate (lint + type-check + security)
 ./scripts/run_tests.sh --quality
 
@@ -342,7 +345,18 @@ uv sync
 
 # Lint / format
 uv run ruff check app tests --fix
+
+# Run pre-commit checks across the repo
+uv run pre-commit run --all-files
+
+# Refresh the committed secret-scanner baseline after intentional changes
+uv run detect-secrets scan --exclude-files '^\.secrets\.baseline$' . > .secrets.baseline
 ```
+
+The pre-commit stack blocks obviously sensitive local files by path and filename
+and also scans staged content for likely secrets. If you need to document a
+template, rename it with a suffix like `.example`, `.sample`, or `.template`
+instead of committing a real credential or certificate.
 
 ### Port assignments
 

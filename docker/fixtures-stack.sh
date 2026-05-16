@@ -72,6 +72,23 @@ build_image() {
     "${PROJECT_ROOT}/docker/build-fixtures.sh"
 }
 
+force_refresh_services() {
+    local service_names
+    service_names="$(docker service ls \
+        --filter "label=com.docker.stack.namespace=${STACK_NAME}" \
+        --format '{{.Name}}')"
+
+    if [[ -z "${service_names}" ]]; then
+        return 0
+    fi
+
+    while IFS= read -r service_name; do
+        [[ -n "${service_name}" ]] || continue
+        echo "Refreshing fixture service '${service_name}' to pick up rebuilt image."
+        docker service update --force --update-order stop-first --detach=false "${service_name}"
+    done <<< "${service_names}"
+}
+
 # ---------------------------------------------------------------------------
 # Dev container ↔ overlay network bridge
 # ---------------------------------------------------------------------------
@@ -123,6 +140,7 @@ start_stack() {
     load_ports_env
     ensure_swarm_manager
     docker stack deploy -c "${COMPOSE_FILE}" "${STACK_NAME}"
+    force_refresh_services
     connect_dev_container
 }
 

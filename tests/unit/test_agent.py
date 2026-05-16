@@ -10,6 +10,7 @@ import pytest
 from pydantic_graph import End
 
 from app.agent.agent import AgentResult, GofrAgent
+from app.agent.events import EventCollector, EventSink
 from app.config import GofrAgentConfig
 from app.services.discovery import MCPToolInfo
 from app.services.registry import ServiceRegistry
@@ -193,6 +194,39 @@ class TestGofrAgentRun:
             sess = await store.get_or_create(None)
             with pytest.raises(TimeoutError):
                 await ga.run("hello", sess)
+
+    async def test_empty_exception_message_is_reported_with_class_name(self) -> None:
+        config = _make_config()
+        reg = _make_registry()
+        ga = GofrAgent(config, reg)
+
+        fake_run = _FakeAgentRun(
+            nodes=[_FakeModelRequestNode(["thinking"])],
+            result_output="",
+            new_messages=[],
+            total_tokens=0,
+            next_exception=AssertionError(),
+        )
+        collector = EventCollector("req-1", "session-1")
+        event_sink = EventSink(collector)
+
+        with patch.multiple(
+            "app.agent.agent",
+            ModelRequestNode=_FakeModelRequestNode,
+            CallToolsNode=_FakeCallToolsNode,
+            FunctionToolCallEvent=_FakeFunctionToolCallEvent,
+            FunctionToolResultEvent=_FakeFunctionToolResultEvent,
+        ):
+            ga._agent = MagicMock()
+            ga._agent.iter = _async_cm(fake_run)
+
+            store = SessionStore()
+            sess = await store.get_or_create("session-1")
+            with pytest.raises(RuntimeError, match="AssertionError raised without a message"):
+                await ga.run("hello", sess, event_sink=event_sink)
+
+        failed_events = [event for event in collector.events if event["kind"] == "run_failed"]
+        assert failed_events[-1]["error"] == "AssertionError raised without a message"
 
     async def test_concurrent_different_sessions_no_contention(self) -> None:
         """Two sessions can run concurrently."""
@@ -404,12 +438,14 @@ class _FakeAgentRun:
         result_output: str,
         new_messages: list[object],
         total_tokens: int,
+        next_exception: Exception | None = None,
     ) -> None:
         self._nodes = nodes
         self._index = 0
         self._result = MagicMock(output=result_output)
         self._new_messages = new_messages
         self._usage = MagicMock(total_tokens=total_tokens)
+        self._next_exception = next_exception
         self.ctx = MagicMock()
 
     @property
@@ -421,6 +457,8 @@ class _FakeAgentRun:
         return self._result
 
     async def next(self, node):  # type: ignore[no-untyped-def]
+        if self._next_exception is not None:
+            raise self._next_exception
         self._index += 1
         if self._index >= len(self._nodes):
             return End(self._result)

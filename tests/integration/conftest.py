@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 from tests.integration.mock_mcp_server import server_url, start_server, stop_server
@@ -44,8 +46,12 @@ _instruments_url: str | None = None
 def instruments_url() -> str:  # type: ignore[return]
     global _instruments_thread, _instruments_url
     if _instruments_url is None:
+        from tests.fixtures.mcp_services import instruments as instruments_module
         from tests.fixtures.mcp_services._server import make_service_server
-        from tests.fixtures.mcp_services.instruments import mcp as instruments_mcp
+
+        instruments_module = importlib.reload(instruments_module)
+        instruments_mcp = instruments_module.mcp
+
         host, port, thread = make_service_server(instruments_mcp)
         _instruments_thread = thread
         _instruments_url = f"http://{host}:{port}/mcp"
@@ -101,8 +107,12 @@ _analytics_url: str | None = None
 def analytics_url() -> str:  # type: ignore[return]
     global _analytics_thread, _analytics_url
     if _analytics_url is None:
+        from tests.fixtures.mcp_services import analytics as analytics_module
         from tests.fixtures.mcp_services._server import make_service_server
-        from tests.fixtures.mcp_services.analytics import mcp as analytics_mcp
+
+        analytics_module = importlib.reload(analytics_module)
+        analytics_mcp = analytics_module.mcp
+
         host, port, thread = make_service_server(analytics_mcp)
         _analytics_thread = thread
         _analytics_url = f"http://{host}:{port}/mcp"

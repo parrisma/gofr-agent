@@ -21,6 +21,8 @@ class ServiceConfig(BaseModel):
     url: str
     token: str | None = None
     token_env: str | None = None
+    hub_callback_token: str | None = None
+    hub_callback_token_env: str | None = None
     description: str = ""
     enabled: bool = True
     timeout_s: float = 30.0
@@ -39,7 +41,13 @@ class ServiceConfig(BaseModel):
         """If token_env is set, read the token from that env var."""
         if self.token_env and not self.token:
             self.token = os.environ.get(self.token_env)
+        if self.hub_callback_token_env and not self.hub_callback_token:
+            self.hub_callback_token = os.environ.get(self.hub_callback_token_env)
         return self
+
+    def safe_dump(self) -> dict[str, Any]:
+        """Return a serialisable representation without resolved secret values."""
+        return self.model_dump(exclude={"token", "hub_callback_token"})
 
 
 class ServicesManifest(BaseModel):
@@ -88,6 +96,12 @@ class ServicesManifest(BaseModel):
                     url=url,
                     token=os.environ.get(f"{prefix}_{key}_TOKEN") or None,
                     token_env=os.environ.get(f"{prefix}_{key}_TOKEN_ENV") or None,
+                    hub_callback_token=(
+                        os.environ.get(f"{prefix}_{key}_HUB_CALLBACK_TOKEN") or None
+                    ),
+                    hub_callback_token_env=(
+                        os.environ.get(f"{prefix}_{key}_HUB_CALLBACK_TOKEN_ENV") or None
+                    ),
                     description=os.environ.get(f"{prefix}_{key}_DESCRIPTION", ""),
                     enabled=os.environ.get(f"{prefix}_{key}_ENABLED", "true").lower()
                     not in ("0", "false", "no"),

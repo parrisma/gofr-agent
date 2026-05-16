@@ -225,9 +225,15 @@ class TestShutdown:
         pool2 = MagicMock(spec=SessionPool)
         pool2.stop = AsyncMock()
         registry._pools = {"a": pool1, "b": pool2}
+        registry._services = {"a": _make_svc("a"), "b": _make_svc("b")}
+        registry._tools = {"a": _make_tools("echo", service="a")}
+        registry._hub_capabilities = {"a": MagicMock(), "b": MagicMock()}
 
         await registry.shutdown()
 
         pool1.stop.assert_awaited_once()
         pool2.stop.assert_awaited_once()
         assert registry._pools == {}
+        assert registry._services == {}
+        assert registry._tools == {}
+        assert registry._hub_capabilities == {}

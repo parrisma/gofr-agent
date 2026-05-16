@@ -55,7 +55,7 @@ x-svc-defaults: &svc-defaults
     update_config:
       parallelism: 1
       delay: 10s
-      order: start-first
+      order: stop-first
     resources:
       limits:
         cpus: "0.50"
@@ -74,6 +74,7 @@ services:
     environment:
       SERVICE_NAME: "gofr-agent-mcp-instruments"
       SERVICE_PORT: "8500"
+      GOFR_FIXTURES_HUB_CALLBACK_TOKEN: "${GOFR_FIXTURES_HUB_CALLBACK_TOKEN:-dev-fixtures-hub-token}"
     ports:
       - target: 8500
         published: "${FIXTURE_INSTRUMENTS_PORT:-8500}"
@@ -146,6 +147,7 @@ services:
     environment:
       SERVICE_NAME: "gofr-agent-mcp-analytics"
       SERVICE_PORT: "8503"
+      GOFR_FIXTURES_HUB_CALLBACK_TOKEN: "${GOFR_FIXTURES_HUB_CALLBACK_TOKEN:-dev-fixtures-hub-token}"
     ports:
       - target: 8503
         published: "${FIXTURE_ANALYTICS_PORT:-8503}"
