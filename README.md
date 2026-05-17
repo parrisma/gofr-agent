@@ -280,6 +280,12 @@ uv run python -m app.cli.ask --verbose "What is the capital of France?"
 # Emit JSON with both streamed events and the final response
 uv run python -m app.cli.ask --format json "What is the capital of France?"
 
+# Human-in-the-loop prompt/resume in text mode
+uv run python -m app.cli.ask --interactive "Compute volatility"
+
+# Human-in-the-loop in JSON mode for scripts; prints waiting_for_user and exits
+uv run python -m app.cli.ask --interactive --format json "Compute volatility"
+
 # Structured prompt-hardening controls
 uv run python -m app.cli.ask \
   --instructions "Return compact JSON only" \
@@ -300,6 +306,70 @@ then prints the final answer. `--quiet` suppresses event output and metadata.
 tool-result summaries. `--format json` prints `{"events": [...], "response": {...}}`.
 The CLI consumes MCP `notifications/message` log events and filters for the
 `gofr-agent.reasoning` payloads.
+
+Human-in-the-loop support is Phase 1A: deterministic missing-field prompts can
+pause before the LLM run starts. The server must enable structured
+clarification responses, and dev/test deployments must explicitly allow resume:
+
+```bash
+GOFR_AGENT_VERIFICATION_GAP_RESPONSE_ENABLED=true \
+GOFR_AGENT_ALLOW_UNAUTHENTICATED_RESUME=true \
+uv run python -m app.main_mcp --services-file services.yml
+```
+
+With `--interactive` in text mode, the CLI shows the prompt, reads one answer
+from the terminal, then calls `respond_to_user_input` and prints the completed
+response. With `--interactive --format json`, it prints the `waiting_for_user`
+payload without prompting so scripts can store `session_id` and `prompt_id` and
+resume later. If stdin is not a TTY, text mode also prints the waiting payload
+and exits non-zero instead of blocking.
+
+Human-in-the-loop examples:
+
+```bash
+# 1. Text mode: ask an underspecified question, answer the CLI prompt, then
+#    receive the resumed final answer.
+uv run python -m app.cli.ask --interactive "Compute volatility"
+# Example prompt: Please provide the missing field(s): ticker, date_range, window.
+# Example answer typed at the prompt: AAPL, 2026-01-01 to 2026-05-17, 30 days
+
+# 2. JSON mode: useful for scripts and UIs. The CLI does not prompt; it returns
+#    response.status == "waiting_for_user" plus session_id and prompt_id.
+uv run python -m app.cli.ask \
+  --interactive \
+  --format json \
+  "Compute volatility"
+
+# 3. Named session with constraints: the pending prompt, answer, and resumed run
+#    stay tied to the same session.
+uv run python -m app.cli.ask \
+  --session risk-demo \
+  --interactive \
+  --tools-only \
+  --instructions "Return compact JSON only" \
+  "Calculate realised P&L"
+```
+
+To resume a JSON-mode waiting prompt outside the interactive CLI, use any MCP
+client to call `respond_to_user_input` with the returned `session_id` and
+`prompt_id`, for example:
+
+```json
+{
+  "session_id": "risk-demo",
+  "prompt_id": "...",
+  "value": {
+    "ticker": "AAPL",
+    "date_range": "2026-01-01 to 2026-05-17",
+    "window": "30 days"
+  }
+}
+```
+
+On reconnect, call `get_pending_user_input` with the `session_id` to recover a
+waiting prompt. To abandon the prompt, call `cancel_user_input` with the same
+`session_id` and `prompt_id`. LLM-initiated mid-run prompts remain Phase 1B;
+Phase 1A covers deterministic pre-run clarification only.
 
 ### Interactive fixture chat
 

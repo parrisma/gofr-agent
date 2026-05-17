@@ -10,6 +10,8 @@ from __future__ import annotations
 from app.auth.auth_service import AuthService, FailClosedAuthService, get_auth_service
 from app.auth.permissions import (
     AGENT_ASK,
+    AGENT_CANCEL_USER_INPUT,
+    AGENT_GET_PENDING_USER_INPUT,
     AGENT_HUB_FETCH,
     AGENT_HUB_REGISTER,
     AGENT_HUB_STORE,
@@ -19,6 +21,7 @@ from app.auth.permissions import (
     AGENT_REFRESH_SERVICES,
     AGENT_REGISTER_SERVICE,
     AGENT_RESET_SESSION,
+    AGENT_RESPOND_TO_USER_INPUT,
     ALL_ACTIVITIES,
     downstream_activity,
     is_authorised,
@@ -34,6 +37,8 @@ __all__ = [
     "get_auth_service",
     # permissions
     "AGENT_ASK",
+    "AGENT_CANCEL_USER_INPUT",
+    "AGENT_GET_PENDING_USER_INPUT",
     "AGENT_HUB_FETCH",
     "AGENT_HUB_REGISTER",
     "AGENT_HUB_STORE",
@@ -42,6 +47,7 @@ __all__ = [
     "AGENT_PING",
     "AGENT_REFRESH_SERVICES",
     "AGENT_REGISTER_SERVICE",
+    "AGENT_RESPOND_TO_USER_INPUT",
     "AGENT_RESET_SESSION",
     "ALL_ACTIVITIES",
     "downstream_activity",

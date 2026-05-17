@@ -7,11 +7,15 @@ from datetime import UTC, datetime, timedelta
 from app.agent.events import (
     EventCollector,
     RunCompletedEvent,
+    RunPausedEvent,
+    RunResumedEvent,
     RunStartedEvent,
     TextDeltaCoalescer,
     TextDeltaEvent,
     ToolCallEvent,
     ToolResultEvent,
+    UserInputReceivedEvent,
+    UserInputRequestedEvent,
 )
 
 
@@ -47,6 +51,89 @@ class TestReasoningEvents:
 
         assert first["sequence"] == 1
         assert second["sequence"] == 2
+
+    def test_collector_applies_run_id_to_events(self) -> None:
+        collector = EventCollector("req-1", "sess-1", run_id="run-1")
+
+        event = collector.record(RunStartedEvent(request_id="x", session_id="y"))
+
+        assert event["run_id"] == "run-1"
+
+    def test_user_input_requested_event_serialises(self) -> None:
+        event = UserInputRequestedEvent(
+            request_id="req-1",
+            session_id="sess-1",
+            run_id="run-1",
+            prompt_id="prompt-1",
+            prompt="Please provide ticker.",
+            missing_fields=["ticker"],
+        )
+
+        payload = event.model_dump(mode="json")
+
+        assert payload["kind"] == "user_input_requested"
+        assert payload["run_id"] == "run-1"
+        assert payload["prompt_id"] == "prompt-1"
+        assert payload["prompt"] == "Please provide ticker."
+        assert payload["missing_fields"] == ["ticker"]
+        assert isinstance(payload["timestamp"], str)
+
+    def test_user_input_received_event_does_not_carry_value(self) -> None:
+        payload = UserInputReceivedEvent(
+            request_id="req-1",
+            session_id="sess-1",
+            run_id="run-1",
+            prompt_id="prompt-1",
+        ).model_dump(mode="json")
+
+        assert payload["kind"] == "user_input_received"
+        assert "value" not in payload
+
+    def test_user_input_events_are_in_final_steps(self) -> None:
+        collector = EventCollector("req-1", "sess-1")
+        collector.record(
+            UserInputRequestedEvent(
+                request_id="x",
+                session_id="y",
+                run_id="run-1",
+                prompt_id="prompt-1",
+                prompt="Need ticker.",
+            )
+        )
+        collector.record(
+            RunPausedEvent(
+                request_id="x",
+                session_id="y",
+                run_id="run-1",
+                prompt_id="prompt-1",
+            )
+        )
+        collector.record(
+            UserInputReceivedEvent(
+                request_id="x",
+                session_id="y",
+                run_id="run-1",
+                prompt_id="prompt-1",
+            )
+        )
+        collector.record(
+            RunResumedEvent(
+                request_id="x",
+                session_id="y",
+                run_id="run-1",
+                prompt_id="prompt-1",
+            )
+        )
+
+        steps = collector.build_steps()
+
+        assert [step["kind"] for step in steps] == [
+            "user_input_requested",
+            "run_paused",
+            "user_input_received",
+            "run_resumed",
+        ]
+        assert [step["sequence"] for step in steps] == [1, 2, 3, 4]
 
     def test_final_steps_are_derived_from_collected_events(self) -> None:
         collector = EventCollector("req-1", "sess-1")

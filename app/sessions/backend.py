@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from app.agent.contracts import HumanInputRequest
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
@@ -104,6 +106,39 @@ def build_session_summary(existing_summary: str, compacted_messages: Iterable[An
 
 
 @dataclass
+class PendingAskPayload:
+    """Original ask parameters needed to resume a Phase 1A prompt."""
+
+    question: str
+    context: str | None = None
+    instructions: str | None = None
+    asserted_facts: list[str] | None = None
+    pasted_content: list[str] | None = None
+    forbidden_services: list[str] | None = None
+    forbidden_tools: list[str] | None = None
+    allowed_services: list[str] | None = None
+    tools_only: bool | None = None
+    output_format: str | None = None
+    no_commentary: bool | None = None
+    max_steps: int = 10
+    model_override: str | None = None
+
+
+@dataclass
+class PendingUserInput:
+    """One unresolved human-input prompt for a session."""
+
+    prompt_id: str
+    run_id: str
+    request_id: str
+    human_input_request: HumanInputRequest
+    resume_payload: PendingAskPayload
+    created_at: datetime
+    expires_at: datetime
+    subject: str | None = None
+
+
+@dataclass
 class Session:
     """A single conversation session."""
 
@@ -111,6 +146,7 @@ class Session:
     max_messages_per_session: int = 100
     messages: list[Any] = field(default_factory=list)
     summary: str = ""
+    pending_user_input: PendingUserInput | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
@@ -124,6 +160,7 @@ class Session:
     def clear(self) -> None:
         self.messages = []
         self.summary = ""
+        self.pending_user_input = None
         self.touch()
 
     def append_messages(self, new_messages: list[Any]) -> str | None:

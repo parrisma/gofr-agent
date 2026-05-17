@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,7 +17,7 @@ from gofr_common.web import reset_auth_header_context, set_auth_header_context
 from mcp import McpError
 
 from app.agent.agent import AgentResult, GofrAgent
-from app.agent.contracts import ProvenanceRecord, VerificationGap
+from app.agent.contracts import HumanInputRequest, ProvenanceRecord, VerificationGap
 from app.auth import ALL_ACTIVITIES
 from app.config import GofrAgentConfig
 from app.exceptions import ServiceRegistrationPolicyError, SessionNotFoundError
@@ -24,6 +26,7 @@ from app.request_context import get_request_id
 from app.services import ServiceConfig
 from app.services.pool import SessionPool
 from app.services.registry import ServiceRegistry
+from app.sessions.backend import PendingAskPayload, PendingUserInput
 from app.sessions.store import SessionStore
 
 # ---------------------------------------------------------------------------
@@ -68,8 +71,8 @@ def _auth_context(token: str | None = "dev-admin-token") -> Generator[None, None
 # ---------------------------------------------------------------------------
 
 
-def _make_config() -> GofrAgentConfig:
-    return GofrAgentConfig()
+def _make_config(**kwargs: Any) -> GofrAgentConfig:
+    return GofrAgentConfig(**kwargs)
 
 
 def _make_registry(pools: dict | None = None, tools: list | None = None) -> MagicMock:
@@ -100,6 +103,81 @@ def _make_agent() -> MagicMock:
 
 def _make_store() -> SessionStore:
     return SessionStore()
+
+
+def _make_human_input_request(
+    *,
+    session_id: str = "session-1",
+    prompt_id: str = "prompt-secret-1234567890",
+    run_id: str = "run-1",
+) -> HumanInputRequest:
+    now = datetime.now(UTC)
+    return HumanInputRequest(
+        prompt_id=prompt_id,
+        run_id=run_id,
+        session_id=session_id,
+        prompt="Please provide the missing field(s): ticker.",
+        created_at=now,
+        expires_at=now + timedelta(minutes=5),
+        missing_fields=["ticker"],
+    )
+
+
+def _make_pending(
+    *,
+    session_id: str = "session-1",
+    prompt_id: str = "prompt-secret-1234567890",
+    run_id: str = "run-1",
+    expires_delta: timedelta = timedelta(minutes=5),
+) -> PendingUserInput:
+    now = datetime.now(UTC)
+    human_input_request = HumanInputRequest(
+        prompt_id=prompt_id,
+        run_id=run_id,
+        session_id=session_id,
+        prompt="Please provide the missing field(s): ticker.",
+        created_at=now,
+        expires_at=now + expires_delta,
+        missing_fields=["ticker"],
+    )
+    return PendingUserInput(
+        prompt_id=prompt_id,
+        run_id=run_id,
+        request_id="request-1",
+        human_input_request=human_input_request,
+        resume_payload=PendingAskPayload(
+            question="Compute volatility",
+            context="legacy context",
+            instructions="Return JSON only.",
+            asserted_facts=["Market is open."],
+            pasted_content=["third-party note"],
+            forbidden_services=["trades"],
+            forbidden_tools=["analytics.simple_return"],
+            allowed_services=["instruments"],
+            tools_only=True,
+            output_format="json",
+            no_commentary=True,
+            max_steps=3,
+            model_override="test:model",
+        ),
+        created_at=now,
+        expires_at=now + expires_delta,
+    )
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.messages: list[dict[str, Any]] = []
+
+    async def send_log_message(self, **kwargs: Any) -> None:
+        self.messages.append(kwargs)
+
+
+class _FakeContext:
+    def __init__(self) -> None:
+        self.request_id = "ctx-request-1"
+        self.request_context = MagicMock()
+        self.request_context.session = _FakeSession()
 
 
 async def _call_tool(mcp, tool_name: str, **kwargs):  # type: ignore[return, no-untyped-def]
@@ -212,6 +290,10 @@ class TestAsk:
         assert result["verification_gap"] is None
         assert result["clarification_request"] is None
         assert result["provenance"] == []
+        assert result["status"] == "completed"
+        assert result["is_complete"] is True
+        assert result["run_id"] == result["request_id"]
+        assert result["user_input_request"] is None
         assert result["session_id"] != ""
         assert result["request_id"] != ""
 
@@ -242,6 +324,154 @@ class TestAsk:
             await _call_tool(mcp, "ask", question="hello")
         _, call_kwargs = agent.run.call_args
         assert call_kwargs.get("token") == "dev-admin-token"
+        assert call_kwargs.get("interactive") is False
+
+    async def test_ask_interactive_rejected_when_resume_not_enabled(self) -> None:
+        agent = _make_agent()
+        mcp = create_mcp_server(
+            _make_config(allow_unauthenticated_resume=False),
+            _make_registry(),
+            agent,
+            _make_store(),
+            _AllowAll(),
+        )
+        with _auth_context(), pytest.raises(McpError, match="interactive resume requires"):
+            await _call_tool(mcp, "ask", question="hello", interactive=True)
+        agent.run.assert_not_called()
+
+    async def test_ask_interactive_passed_when_resume_enabled(self) -> None:
+        agent = _make_agent()
+        mcp = create_mcp_server(
+            _make_config(allow_unauthenticated_resume=True),
+            _make_registry(),
+            agent,
+            _make_store(),
+            _AllowAll(),
+        )
+        with _auth_context():
+            await _call_tool(mcp, "ask", question="hello", interactive=True)
+        _, call_kwargs = agent.run.call_args
+        assert call_kwargs["interactive"] is True
+
+    async def test_ask_interactive_default_rejected_before_agent_run(self) -> None:
+        agent = _make_agent()
+        mcp = create_mcp_server(
+            _make_config(interactive_default=True, allow_unauthenticated_resume=False),
+            _make_registry(),
+            agent,
+            _make_store(),
+            _AllowAll(),
+        )
+        with _auth_context(), pytest.raises(McpError, match="interactive resume requires"):
+            await _call_tool(mcp, "ask", question="hello")
+        agent.run.assert_not_called()
+
+    async def test_ask_waiting_result_stores_pending_prompt(self) -> None:
+        store = _make_store()
+        agent = _make_agent()
+        user_input_request = _make_human_input_request(session_id="session-1")
+        agent.run = AsyncMock(
+            return_value=AgentResult(
+                answer="",
+                status="waiting_for_user",
+                is_complete=False,
+                run_id="run-1",
+                user_input_request=user_input_request,
+            )
+        )
+        mcp = create_mcp_server(
+            _make_config(allow_unauthenticated_resume=True),
+            _make_registry(),
+            agent,
+            store,
+            _AllowAll(),
+        )
+
+        with _auth_context():
+            result = await _call_tool(
+                mcp,
+                "ask",
+                question="Compute volatility",
+                session_id="session-1",
+                context="legacy context",
+                instructions="Return JSON only.",
+                asserted_facts=["Market is open."],
+                pasted_content=["third-party note"],
+                forbidden_services=["trades"],
+                forbidden_tools=["analytics.simple_return"],
+                allowed_services=["instruments"],
+                tools_only=True,
+                output_format="json",
+                no_commentary=True,
+                max_steps=3,
+                model_override=None,
+                interactive=True,
+            )
+
+        pending = await store.get_pending_user_input("session-1")
+        assert pending is not None
+        assert not hasattr(pending, "token")
+        assert result["status"] == "waiting_for_user"
+        assert result["is_complete"] is False
+        assert result["answer"] == ""
+        assert result["user_input_request"]["prompt_id"] == pending.prompt_id
+        assert pending.resume_payload.question == "Compute volatility"
+        assert pending.resume_payload.context == "legacy context"
+        assert pending.resume_payload.allowed_services == ["instruments"]
+        assert pending.resume_payload.max_steps == 3
+
+    async def test_ask_rejects_new_request_when_pending_exists(self) -> None:
+        store = _make_store()
+        await store.get_or_create("session-1")
+        await store.set_pending_user_input("session-1", _make_pending(session_id="session-1"))
+        agent = _make_agent()
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), agent, store, _AllowAll()
+        )
+
+        with _auth_context(), pytest.raises(McpError, match="session has pending user input"):
+            await _call_tool(mcp, "ask", question="hello", session_id="session-1")
+        agent.run.assert_not_called()
+
+    async def test_ask_clears_expired_pending_before_new_request(self) -> None:
+        store = _make_store()
+        await store.get_or_create("session-1")
+        await store.set_pending_user_input(
+            "session-1",
+            _make_pending(session_id="session-1", expires_delta=timedelta(seconds=-1)),
+        )
+        agent = _make_agent()
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), agent, store, _AllowAll()
+        )
+
+        with _auth_context():
+            result = await _call_tool(mcp, "ask", question="hello", session_id="session-1")
+
+        assert result["status"] == "completed"
+        assert await store.get_pending_user_input("session-1") is None
+        agent.run.assert_awaited_once()
+
+    async def test_ask_waiting_result_without_request_is_rejected(self) -> None:
+        agent = _make_agent()
+        agent.run = AsyncMock(
+            return_value=AgentResult(
+                answer="",
+                status="waiting_for_user",
+                is_complete=False,
+                run_id="run-1",
+            )
+        )
+        mcp = create_mcp_server(
+            _make_config(allow_unauthenticated_resume=True),
+            _make_registry(),
+            agent,
+            _make_store(),
+            _AllowAll(),
+        )
+
+        with _auth_context(), pytest.raises(McpError, match="missing user_input_request"):
+            await _call_tool(mcp, "ask", question="hello", interactive=True)
 
     async def test_ask_passes_structured_caller_fields_to_agent(self) -> None:
         agent = _make_agent()
@@ -408,6 +638,285 @@ class TestAsk:
 
         assert result["verification_gap"]["reason"] == "no_service_registered"
         assert result["provenance"][0]["args_hash"] == "abc123"
+
+
+class TestPendingUserInputTools:
+    async def test_get_pending_denied_when_activity_missing(self) -> None:
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), _make_store(), _DenyAll()
+        )
+        with _auth_context(), pytest.raises(McpError):
+            await _call_tool(mcp, "get_pending_user_input", session_id="session-1")
+
+    async def test_get_pending_returns_not_found_when_absent(self) -> None:
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), _make_store(), _AllowAll()
+        )
+        with _auth_context():
+            result = await _call_tool(mcp, "get_pending_user_input", session_id="missing")
+        assert result == {
+            "status": "not_found",
+            "session_id": "missing",
+            "user_input_request": None,
+        }
+
+    async def test_get_pending_returns_matching_prompt(self) -> None:
+        store = _make_store()
+        await store.get_or_create("session-1")
+        await store.set_pending_user_input("session-1", _make_pending(session_id="session-1"))
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), store, _AllowAll()
+        )
+
+        with _auth_context():
+            result = await _call_tool(
+                mcp,
+                "get_pending_user_input",
+                session_id="session-1",
+                prompt_id="prompt-secret-1234567890",
+            )
+
+        assert result["status"] == "waiting_for_user"
+        assert result["run_id"] == "run-1"
+        assert result["user_input_request"]["prompt_id"] == "prompt-secret-1234567890"
+
+    async def test_get_pending_wrong_prompt_id_hides_prompt(self) -> None:
+        store = _make_store()
+        await store.get_or_create("session-1")
+        await store.set_pending_user_input("session-1", _make_pending(session_id="session-1"))
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), store, _AllowAll()
+        )
+
+        with _auth_context():
+            result = await _call_tool(
+                mcp,
+                "get_pending_user_input",
+                session_id="session-1",
+                prompt_id="wrong",
+            )
+
+        assert result["status"] == "not_found"
+        assert result["user_input_request"] is None
+        assert await store.get_pending_user_input("session-1") is not None
+
+    async def test_get_pending_expired_clears_state(self) -> None:
+        store = _make_store()
+        await store.get_or_create("session-1")
+        await store.set_pending_user_input(
+            "session-1",
+            _make_pending(session_id="session-1", expires_delta=timedelta(seconds=-1)),
+        )
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), store, _AllowAll()
+        )
+
+        with _auth_context():
+            result = await _call_tool(mcp, "get_pending_user_input", session_id="session-1")
+
+        assert result["status"] == "expired"
+        assert await store.get_pending_user_input("session-1") is None
+
+    async def test_cancel_matching_pending_prompt(self) -> None:
+        store = _make_store()
+        await store.get_or_create("session-1")
+        await store.set_pending_user_input("session-1", _make_pending(session_id="session-1"))
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), store, _AllowAll()
+        )
+
+        with _auth_context():
+            result = await _call_tool(
+                mcp,
+                "cancel_user_input",
+                session_id="session-1",
+                prompt_id="prompt-secret-1234567890",
+                reason="No longer needed",
+            )
+
+        assert result["status"] == "cancelled"
+        assert await store.get_pending_user_input("session-1") is None
+
+    async def test_cancel_wrong_prompt_preserves_state(self) -> None:
+        store = _make_store()
+        await store.get_or_create("session-1")
+        await store.set_pending_user_input("session-1", _make_pending(session_id="session-1"))
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), store, _AllowAll()
+        )
+
+        with _auth_context():
+            result = await _call_tool(
+                mcp,
+                "cancel_user_input",
+                session_id="session-1",
+                prompt_id="wrong",
+            )
+
+        assert result["status"] == "not_found"
+        assert await store.get_pending_user_input("session-1") is not None
+
+    async def test_cancel_emits_bounded_reason_when_context_is_available(self) -> None:
+        store = _make_store()
+        await store.get_or_create("session-1")
+        await store.set_pending_user_input("session-1", _make_pending(session_id="session-1"))
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), store, _AllowAll()
+        )
+        ctx = _FakeContext()
+
+        with _auth_context():
+            await _call_tool(
+                mcp,
+                "cancel_user_input",
+                session_id="session-1",
+                prompt_id="prompt-secret-1234567890",
+                reason="x" * 600,
+                ctx=ctx,
+            )
+
+        event = ctx.request_context.session.messages[-1]["data"]
+        assert event["kind"] == "user_input_cancelled"
+        assert len(event["reason"]) == 512
+        assert event["run_id"] == "run-1"
+
+    async def test_respond_denied_when_activity_missing(self) -> None:
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), _make_store(), _DenyAll()
+        )
+        with _auth_context(), pytest.raises(McpError):
+            await _call_tool(
+                mcp,
+                "respond_to_user_input",
+                session_id="session-1",
+                prompt_id="prompt-secret-1234567890",
+                value={"ticker": "AAPL"},
+            )
+
+    async def test_respond_unknown_prompt_returns_not_found(self) -> None:
+        agent = _make_agent()
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), agent, _make_store(), _AllowAll()
+        )
+
+        with _auth_context():
+            result = await _call_tool(
+                mcp,
+                "respond_to_user_input",
+                session_id="session-1",
+                prompt_id="prompt-secret-1234567890",
+                value={"ticker": "AAPL"},
+            )
+
+        assert result["status"] == "not_found"
+        agent.run.assert_not_called()
+
+    async def test_respond_matching_prompt_pops_and_resumes_agent(self) -> None:
+        store = _make_store()
+        await store.get_or_create("session-1")
+        await store.set_pending_user_input("session-1", _make_pending(session_id="session-1"))
+        agent = _make_agent()
+        agent.run = AsyncMock(
+            return_value=AgentResult(answer="done", steps=[], model="test", tokens_used=4)
+        )
+        mcp = create_mcp_server(
+            _make_config(allowed_models=["test:model"]),
+            _make_registry(),
+            agent,
+            store,
+            _AllowAll(),
+        )
+        ctx = _FakeContext()
+
+        with _auth_context("dev-admin-token"):
+            result = await _call_tool(
+                mcp,
+                "respond_to_user_input",
+                session_id="session-1",
+                prompt_id="prompt-secret-1234567890",
+                value={"ticker": "AAPL"},
+                ctx=ctx,
+            )
+
+        assert result["status"] == "completed"
+        assert result["user_input_request"] is None
+        assert await store.get_pending_user_input("session-1") is None
+        _, call_kwargs = agent.run.call_args
+        resumed_question = agent.run.call_args.args[0]
+        assert "Original request:\nCompute volatility" in resumed_question
+        assert "The agent requested missing fields: ticker" in resumed_question
+        assert '"ticker": "AAPL"' in resumed_question
+        assert call_kwargs["interactive"] is False
+        assert call_kwargs["context"] == "legacy context"
+        assert call_kwargs["instructions"] == "Return JSON only."
+        assert call_kwargs["asserted_facts"] == ["Market is open."]
+        assert call_kwargs["pasted_content"] == ["third-party note"]
+        assert call_kwargs["forbidden_services"] == ["trades"]
+        assert call_kwargs["forbidden_tools"] == ["analytics.simple_return"]
+        assert call_kwargs["allowed_services"] == ["instruments"]
+        assert call_kwargs["tools_only"] is True
+        assert call_kwargs["output_format"] == "json"
+        assert call_kwargs["no_commentary"] is True
+        assert call_kwargs["max_steps"] == 3
+        assert call_kwargs["model_override"] == "test:model"
+        assert ctx.request_context.session.messages[0]["data"]["kind"] == "user_input_received"
+        assert ctx.request_context.session.messages[1]["data"]["kind"] == "run_resumed"
+        assert ctx.request_context.session.messages[0]["data"]["run_id"] == "run-1"
+
+    async def test_respond_oversized_value_preserves_pending_state(self) -> None:
+        store = _make_store()
+        await store.get_or_create("session-1")
+        await store.set_pending_user_input("session-1", _make_pending(session_id="session-1"))
+        agent = _make_agent()
+        mcp = create_mcp_server(
+            _make_config(max_context_chars=100),
+            _make_registry(),
+            agent,
+            store,
+            _AllowAll(),
+        )
+
+        with _auth_context(), pytest.raises(McpError, match="value exceeds"):
+            await _call_tool(
+                mcp,
+                "respond_to_user_input",
+                session_id="session-1",
+                prompt_id="prompt-secret-1234567890",
+                value={"text": "x" * 200},
+            )
+
+        assert await store.get_pending_user_input("session-1") is not None
+        agent.run.assert_not_called()
+
+    async def test_respond_double_submit_returns_not_found_second_time(self) -> None:
+        store = _make_store()
+        await store.get_or_create("session-1")
+        await store.set_pending_user_input("session-1", _make_pending(session_id="session-1"))
+        agent = _make_agent()
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), agent, store, _AllowAll()
+        )
+
+        with _auth_context():
+            first = await _call_tool(
+                mcp,
+                "respond_to_user_input",
+                session_id="session-1",
+                prompt_id="prompt-secret-1234567890",
+                value={"ticker": "AAPL"},
+            )
+        with _auth_context():
+            second = await _call_tool(
+                mcp,
+                "respond_to_user_input",
+                session_id="session-1",
+                prompt_id="prompt-secret-1234567890",
+                value={"ticker": "AAPL"},
+            )
+
+        assert first["status"] == "completed"
+        assert second["status"] == "not_found"
+        agent.run.assert_awaited_once()
 
 
 class TestResetSession:

@@ -262,6 +262,124 @@ class TestAskCli:
         assert captured_params[0]["tools_only"] is True
         assert captured_params[0]["no_commentary"] is True
 
+    def test_interactive_flag_is_sent_when_enabled(self) -> None:
+        captured_params: list[dict] = []
+
+        from contextlib import asynccontextmanager
+
+        client = MagicMock()
+        client.initialize = AsyncMock()
+
+        async def fake_call_tool(tool: str, params: dict) -> MagicMock:  # type: ignore[type-arg]
+            captured_params.append(params)
+            return _make_call_result({"answer": "ok", "session_id": "s", "tokens_used": 1})
+
+        client.call_tool = fake_call_tool
+
+        @asynccontextmanager
+        async def _fake_session_cm(r, w, **kwargs):  # type: ignore[return]
+            yield client
+
+        @asynccontextmanager
+        async def _fake_transport_cm(url, **kwargs):  # type: ignore[return]
+            yield MagicMock(), MagicMock(), None
+
+        with (
+            patch("app.cli.ask.streamablehttp_client", _fake_transport_cm),
+            patch("app.cli.ask.ClientSession", _fake_session_cm),
+        ):
+            result = runner.invoke(app, [*_TOKEN_FLAGS, "--interactive", "Calc"])
+
+        assert result.exit_code == 0
+        assert captured_params[0]["interactive"] is True
+
+    def test_json_interactive_waiting_payload_exits_without_prompt(self) -> None:
+        call_results = {
+            "ask": _make_call_result(
+                {
+                    "status": "waiting_for_user",
+                    "is_complete": False,
+                    "answer": "",
+                    "session_id": "s",
+                    "user_input_request": {
+                        "prompt_id": "prompt-1",
+                        "run_id": "run-1",
+                        "session_id": "s",
+                        "prompt": "Please provide ticker.",
+                    },
+                }
+            )
+        }
+        p1, p2 = _patch_mcp(call_results)
+        with p1, p2:
+            result = runner.invoke(
+                app,
+                [*_TOKEN_FLAGS, "--interactive", "--format", "json", "Calc"],
+            )
+
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["response"]["status"] == "waiting_for_user"
+        assert parsed["response"]["user_input_request"]["prompt_id"] == "prompt-1"
+
+    def test_text_interactive_prompt_calls_respond(self) -> None:
+        calls: list[tuple[str, dict]] = []
+
+        from contextlib import asynccontextmanager
+
+        client = MagicMock()
+        client.initialize = AsyncMock()
+
+        async def fake_call_tool(tool: str, params: dict) -> MagicMock:  # type: ignore[type-arg]
+            calls.append((tool, params))
+            if tool == "ask":
+                return _make_call_result(
+                    {
+                        "status": "waiting_for_user",
+                        "is_complete": False,
+                        "answer": "",
+                        "session_id": "s",
+                        "user_input_request": {
+                            "prompt_id": "prompt-1",
+                            "run_id": "run-1",
+                            "session_id": "s",
+                            "prompt": "Please provide ticker.",
+                        },
+                    }
+                )
+            return _make_call_result(
+                {"status": "completed", "answer": "Done", "session_id": "s"}
+            )
+
+        client.call_tool = fake_call_tool
+
+        @asynccontextmanager
+        async def _fake_session_cm(r, w, **kwargs):  # type: ignore[return]
+            yield client
+
+        @asynccontextmanager
+        async def _fake_transport_cm(url, **kwargs):  # type: ignore[return]
+            yield MagicMock(), MagicMock(), None
+
+        with (
+            patch("app.cli.ask.streamablehttp_client", _fake_transport_cm),
+            patch("app.cli.ask.ClientSession", _fake_session_cm),
+            patch("app.cli.ask._stdin_is_tty", return_value=True),
+        ):
+            result = runner.invoke(
+                app,
+                [*_TOKEN_FLAGS, "--interactive", "Calc"],
+                input="AAPL\n",
+            )
+
+        assert result.exit_code == 0
+        assert calls[0][0] == "ask"
+        assert calls[1] == (
+            "respond_to_user_input",
+            {"session_id": "s", "prompt_id": "prompt-1", "value": "AAPL"},
+        )
+        assert "Answer: Done" in result.output
+
     def test_reset_calls_reset_session(self) -> None:
         call_results = {
             "reset_session": _make_call_result({"status": "ok", "session_id": "sid1"})

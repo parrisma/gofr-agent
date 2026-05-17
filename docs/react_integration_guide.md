@@ -1,367 +1,679 @@
-# gofr-agent — Integration Guide for a React Front-End
+# gofr-agent React Integration Guide for LLM Builders
 
-Audience: an LLM coding assistant working in a separate React/TypeScript
-codebase that needs to add a "chat with the reasoning agent" capability,
-including showing step-by-step reasoning and (eventually) collecting user
-input mid-run.
+Status date: 2026-05-17.
 
-This document describes:
+Audience: an LLM coding assistant working in a React/TypeScript codebase that
+needs to design, build, and test a UI for `gofr-agent`.
 
-1. What gofr-agent is and how it is exposed today.
-2. The exact wire protocol the React app must speak (MCP Streamable HTTP).
-3. The `ask` tool: inputs, outputs, session semantics, auth.
-4. What is and is **not** currently supported (live reasoning notifications
-  are supported; mid-run user input is not).
-5. The current reasoning-notification contract plus one remaining
-  recommended extension (interactive "ask the user" pause/resume).
-6. Reference TypeScript snippets the React-side LLM can adapt directly.
+Use this as the implementation brief. It describes the current backend surface,
+the UI that should be built first, the TypeScript contracts to model, and the
+tests that should prove the interface works.
 
-For repository-wide implementation status, see
-[docs/current_state.md](current_state.md).
+For repository-wide runtime status, see [current_state.md](current_state.md).
 
----
+## 1. LLM operating rules
 
-## 1. What gofr-agent is
+When using this document to build a React interface:
 
-gofr-agent is an MCP (Model Context Protocol) server that wraps a
-`pydantic-ai` reasoning agent. The agent is configured with a set of
-downstream MCP services (e.g. `instruments`, `clients`, `trades`,
-`analytics`) and decides which of their tools to call to answer a user's
-question. Each call is one "step" in its reasoning loop.
+1. Build the actual chat workbench as the first screen. Do not build a landing
+   page, marketing hero, or explanatory splash screen.
+2. Use the official MCP TypeScript SDK. Do not hand-roll MCP JSON-RPC.
+3. Treat the server as authoritative. Do not invent client-only pause/resume,
+   descriptor resolution, service discovery, or hidden tool behavior.
+4. Keep production secrets out of the browser bundle. A dev token can be used
+   for local development only.
+5. Do not hard-code `localhost` for service-to-service traffic. In Docker/dev
+   environments use routable hostnames such as `http://gofr-agent:8090/mcp`.
+   For browser deployments use the operator-provided public origin.
+6. Design for an operations-style application: dense, calm, readable, and built
+   for repeated use. The core user workflow is ask, watch progress, inspect
+   sources/tools, and continue the session.
 
-Key facts:
+## 2. Current backend surface
 
-- Transport: **MCP Streamable HTTP** (single endpoint, default `/mcp`).
-- Default URL inside the dev container: `http://gofr-agent:8090/mcp`.
-- Browser clients need whatever externally reachable origin the deployment
-  exposes; inside the Docker dev network, use the `gofr-agent` service name.
-- LLM backend: configurable through `GOFR_AGENT_LLM_MODEL`; the server config
-  default is `openai:gpt-4o-mini`. Fixture chat and live smoke helpers default
-  to `deepseek/deepseek-v4-pro` via OpenRouter in this repository.
-- Auth: Bearer token in the `Authorization` HTTP header. Required on
-  every request. Dev token is `dev-admin-token`.
-- Sessions: server-side conversation history keyed by `session_id`
-  (UUID-like string chosen by the client). TTL is 60 minutes idle.
+`gofr-agent` is an MCP Streamable HTTP server. It wraps a `pydantic-ai`
+reasoning agent and lets that agent call registered downstream MCP services.
 
----
+Current facts a UI-building LLM must preserve:
 
-## 2. Wire protocol — MCP Streamable HTTP
+| Item | Current value or behavior |
+|------|---------------------------|
+| Transport | MCP Streamable HTTP |
+| Endpoint path | `/mcp` |
+| Default Docker/dev URL | `http://gofr-agent:8090/mcp` |
+| MCP port | `8090` |
+| mcpo proxy port | `8091`, not the preferred React path |
+| Reserved future web UI port | `8092`, no web UI is implemented in this repo |
+| Auth | Bearer token in `Authorization` on every MCP request |
+| Dev admin token | `dev-admin-token` |
+| Session model | Server-side in-memory history keyed by caller-provided `session_id` |
+| Session TTL default | 60 idle minutes |
+| Default max steps | 10 |
+| Hard max steps | 50 |
+| Agent timeout default | 120 seconds |
+| Final response | Returned by the MCP `ask` tool after the run finishes |
+| Live progress | MCP `notifications/message` with logger `gofr-agent.reasoning` |
+| Results hub | Optional, process-local descriptor handoff between services |
 
-The React app should **not** roll its own JSON-RPC client. Use the
-official TypeScript MCP SDK:
+Browser clients usually cannot call an internal Docker service name directly.
+The deployed React app needs an externally reachable MCP origin or a same-origin
+backend proxy. If the React app is served from a different origin, the operator
+must configure CORS on the Starlette/Uvicorn deployment to allow the browser
+origin and the `Authorization` header.
 
-- Package: `@modelcontextprotocol/sdk`
-- Client class: `Client`
-- Transport class: `StreamableHTTPClientTransport`
+## 3. React configuration inputs
 
-Minimum example (works in modern browsers and Node):
+The React app should make these values configurable through environment, a
+settings panel, or the host application's auth layer:
+
+| UI setting | Purpose | Suggested default for local dev |
+|------------|---------|---------------------------------|
+| `mcpUrl` | Full MCP Streamable HTTP URL | `http://gofr-agent:8090/mcp` |
+| `token` | Bearer token | `dev-admin-token` only in local dev |
+| `sessionId` | Chat thread identifier | `crypto.randomUUID()` |
+| `maxSteps` | Per-question tool-call cap | 20 in UI, never above server hard cap |
+| `outputFormat` | Optional final answer shape | unset, `text`, or `json` |
+| `toolsOnly` | Require factual answers from tools | false by default |
+| `allowedServices` | Optional service allow-list | unset |
+| `forbiddenServices` | Services the user disallows | unset |
+| `forbiddenTools` | Tools the user disallows | unset |
+
+Production token guidance:
+
+- Do not bake long-lived bearer tokens into the static bundle.
+- Prefer a same-origin backend that injects or exchanges tokens.
+- If the browser must hold a token, make it short-lived and scoped to the user.
+- The UI should treat auth failures as recoverable configuration errors.
+
+## 4. MCP client contract
+
+Use these packages in the React project:
+
+```bash
+npm install @modelcontextprotocol/sdk
+```
+
+Connect with `StreamableHTTPClientTransport`:
 
 ```ts
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const transport = new StreamableHTTPClientTransport(
-  new URL("http://gofr-agent:8090/mcp"),
-  {
+export async function createGofrClient(opts: { url: string; token: string }) {
+  const transport = new StreamableHTTPClientTransport(new URL(opts.url), {
     requestInit: {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${opts.token}` },
     },
-  },
-);
+  });
 
-const client = new Client(
-  { name: "gofr-agent-react-ui", version: "0.1.0" },
-  { capabilities: {} },
-);
+  const client = new Client(
+    { name: "gofr-agent-react-ui", version: "0.1.0" },
+    { capabilities: {} },
+  );
 
-await client.connect(transport);
-await client.setLoggingLevel("info");
-
-client.setNotificationHandler("notifications/message", notification => {
-  const payload = notification.params?.data;
-  if (!payload || typeof payload !== "object") return;
-  if ((payload as { kind?: unknown }).kind === undefined) return;
-  const logger = notification.params?.logger;
-  if (logger !== "gofr-agent.reasoning") return;
-
-  // Append payload to your active turn's reasoning trace.
-  console.log("reasoning event", payload);
-});
+  await client.connect(transport);
+  await client.setLoggingLevel("info");
+  return client;
+}
 ```
 
-Once connected, the React app calls server-side tools by name:
+The MCP SDK returns tool results as `CallToolResult` objects. For `gofr-agent`
+tools, the first content item is text containing JSON. Parse it before updating
+React state.
 
 ```ts
-const result = await client.callTool({
-  name: "ask",
-  arguments: {
-    question: "Question text",
-    session_id: "ui-session-1",
-    max_steps: 25,
-    instructions: "Return compact JSON only",
-    forbidden_services: ["trades"],
-    tools_only: true,
-  },
+export function parseTextJson<T>(result: { content?: unknown[] }): T {
+  const first = result.content?.[0] as { type?: string; text?: string } | undefined;
+  if (!first || typeof first.text !== "string") {
+    throw new Error("Expected gofr-agent tool response to contain JSON text");
+  }
+  return JSON.parse(first.text) as T;
+}
+```
+
+## 5. MCP tools visible to the React UI
+
+All public tools require the bearer token.
+
+| Tool | UI use |
+|------|--------|
+| `ping` | Startup health check |
+| `list_services` | Capabilities panel and feature availability |
+| `ask` | Main chat request |
+| `respond_to_user_input` | Submit an answer to a Phase 1A pending prompt |
+| `get_pending_user_input` | Recover a pending prompt after reconnect or refresh |
+| `cancel_user_input` | Clear a pending prompt the user abandoned |
+| `reset_session` | Clear current server-side conversation history |
+| `register_service` | Admin-only runtime service registration |
+| `refresh_services` | Admin-only refresh of discovered service metadata |
+
+The Phase 1A user-input tools are protected by dedicated activities but may be
+listed by FastMCP/mcpo. Treat authorization as the security boundary, not tool
+visibility.
+
+Hidden/internal hub tools also exist on the MCP server: `_store_result`,
+`_get_result`, and `_describe_result`. Downstream services use them for results
+hub callbacks. The React UI should not call them.
+
+Downstream services may expose a reserved `_register_results_hub` tool. The
+service registry uses it during discovery. It is filtered out of model-visible
+and UI-facing tool lists.
+
+## 6. Public tool payloads
+
+### `ping`
+
+Arguments: none.
+
+Response:
+
+```ts
+type PingResponse = {
+  status: "ok";
+  timestamp: string;
+  version: string;
+};
+```
+
+UI behavior: call on app start and when the user changes URL/token settings.
+Show connected, unauthorized, unavailable, and misconfigured states distinctly.
+
+### `list_services`
+
+Arguments: none.
+
+Response:
+
+```ts
+type ServiceTool = {
+  name: string;
+  description: string;
+};
+
+type ServiceStatus = {
+  name: string;
+  url?: string;
+  description?: string;
+  enabled?: boolean;
+  status: string;
+  tools: ServiceTool[];
+  supports_results_hub: boolean;
+  can_publish_results: boolean;
+  can_consume_results: boolean;
+  result_types: string[];
+  error?: string;
+  registration_error?: string;
+};
+```
+
+The returned hub capability fields are safe to display. Tokens and callback
+credentials are never returned by `list_services`.
+
+UI behavior:
+
+- Show a compact service list with status, tool count, and hub capability.
+- Expand a service to show model-visible tool names and descriptions.
+- Surface `error` and `registration_error` without treating the whole app as
+  failed; the registry can run in degraded mode.
+- Do not expose hidden `_store_result`, `_get_result`, `_describe_result`, or
+  `_register_results_hub` tools as user-invokable actions.
+
+### `ask`
+
+Arguments:
+
+```ts
+type AskRequest = {
+  question: string;
+  session_id?: string;
+  interactive?: boolean;
+  context?: string;
+  instructions?: string;
+  asserted_facts?: string[];
+  pasted_content?: string[];
+  forbidden_services?: string[];
+  forbidden_tools?: string[];
+  allowed_services?: string[];
+  tools_only?: boolean;
+  output_format?: "json" | "text";
+  no_commentary?: boolean;
+  max_steps?: number;
+  model_override?: string;
+};
+```
+
+Validation enforced by the server:
+
+- `question` is required, trimmed, and cannot be empty.
+- `question` defaults to an 8000 character limit.
+- Combined context/caller content defaults to a 16000 character limit.
+- `output_format` must be `json` or `text` when provided.
+- `max_steps` must be at least 1 and no greater than the server hard cap.
+- `model_override` must be non-empty, authorized, and present in
+  `GOFR_AGENT_ALLOWED_MODELS`.
+
+Response:
+
+```ts
+type AskResponse = {
+  session_id: string;
+  request_id: string;
+  status: "completed" | "waiting_for_user" | "cancelled";
+  is_complete: boolean;
+  run_id: string;
+  answer: string;
+  user_input_request: HumanInputRequest | null;
+  steps: ReasoningEvent[];
+  model: string;
+  tokens_used: number;
+  verification_gap: VerificationGap | null;
+  clarification_request: ClarificationRequest | null;
+  provenance: ProvenanceRecord[];
+};
+
+type HumanInputRequest = {
+  prompt_id: string;
+  run_id: string;
+  session_id: string;
+  prompt: string;
+  input_schema?: Record<string, unknown> | null;
+  choices?: string[] | null;
+  created_at: string;
+  expires_at: string;
+  missing_fields: string[];
+};
+```
+
+UI behavior:
+
+- Append the user message immediately.
+- Start a run state keyed by local turn id and later bind it to `request_id`.
+- Render live reasoning notifications while the `ask` promise is in flight.
+- Check `status` when `ask` resolves. If it is `waiting_for_user`, render
+  `user_input_request.prompt` and collect a bounded answer instead of treating
+  the empty `answer` as final text.
+- Append the final assistant answer when `status` is `completed`.
+- Render `verification_gap` and `clarification_request` as successful run
+  outcomes, not transport failures.
+- Preserve and reuse the returned `session_id` for follow-up turns.
+- Show `model`, `tokens_used`, and `request_id` in compact turn metadata.
+
+Phase 1A resume tools:
+
+```ts
+type RespondToUserInputRequest = {
+  session_id: string;
+  prompt_id: string;
+  value: unknown;
+};
+
+type GetPendingUserInputResponse =
+  | { status: "waiting_for_user"; session_id: string; run_id: string; user_input_request: HumanInputRequest }
+  | { status: "not_found" | "expired"; session_id: string; user_input_request: null };
+
+type CancelUserInputResponse = {
+  status: "cancelled" | "not_found" | "expired";
+  session_id: string;
+  prompt_id: string;
+};
+```
+
+Client behavior:
+
+- Call `respond_to_user_input` with the returned `session_id`, `prompt_id`,
+  and a bounded JSON value. The response has the same envelope as `ask`.
+- Call `get_pending_user_input` after reconnect or page refresh if the local
+  turn is waiting.
+- Call `cancel_user_input` when the user abandons a waiting prompt.
+- Treat the user value as data in the UI too; do not turn it into system or
+  developer instructions.
+
+### `reset_session`
+
+Arguments:
+
+```ts
+type ResetSessionRequest = { session_id: string };
+type ResetSessionResponse = { status: "ok"; session_id: string };
+```
+
+UI behavior: provide a clear conversation action. After success, clear local
+turns and reasoning state for that thread, or create a fresh `session_id`.
+
+### `register_service` and `refresh_services`
+
+These are admin-only. Most React chat interfaces should hide them unless the
+product explicitly includes service administration.
+
+`register_service` is disabled unless
+`GOFR_AGENT_DYNAMIC_REGISTRATION_ENABLED=true`, and the target host must match
+`GOFR_AGENT_ALLOWED_SERVICE_HOSTS`.
+
+## 7. Reasoning notifications
+
+During `ask`, the server emits MCP logging notifications:
+
+| Field | Value |
+|-------|-------|
+| MCP method | `notifications/message` |
+| Logger | `gofr-agent.reasoning` |
+| Payload location | `notification.params.data` |
+| Correlation | `request_id`, also returned by final `ask` response |
+
+Register the handler immediately after connecting:
+
+```ts
+client.setNotificationHandler("notifications/message", notification => {
+  if (notification.params?.logger !== "gofr-agent.reasoning") return;
+  const payload = notification.params?.data;
+  if (!payload || typeof payload !== "object") return;
+  onReasoningEvent(payload as ReasoningEvent);
 });
 ```
 
-The MCP `callTool` response is a `CallToolResult` with a `content` array.
-gofr-agent always returns a single `TextContent` whose `.text` field is a
-JSON string — parse it to get the structured result described below.
+Shared event fields:
 
-While `ask` is running, gofr-agent emits MCP logging notifications. For
-reasoning events, the notification method is `notifications/message`, the logger
-is `gofr-agent.reasoning`, and the notification `data` field is the event
-payload described below.
+```ts
+type ReasoningEventBase = {
+  request_id: string;
+  session_id: string;
+  run_id?: string | null;
+  event_id: string;
+  sequence: number;
+  kind: string;
+  timestamp: string;
+  truncated: boolean;
+};
+```
 
-CORS: the gofr-agent process is `uvicorn` + Starlette. If the React app
-is served from a different origin, the operator must add a CORS
-middleware to allow the browser origin and the `Authorization` header.
-This is a deployment task; flag it to the operator if needed.
+Current event kinds:
 
----
-
-## 3. The tools exposed by gofr-agent
-
-All tools require the `Authorization: Bearer <token>` header. The dev
-token grants every activity below.
-
-### `ping`
-- Args: none.
-- Returns: `{ status: "ok", timestamp: <ISO8601>, version: <str> }`.
-- Use for: connectivity check on app start.
-
-### `list_services`
-- Args: none.
-- Returns: array of `{ name, status, tools: [{ name, description }], supports_results_hub, can_publish_results, can_consume_results, result_types, registration_error? }`.
-- Use for: showing the user which downstream capabilities exist.
-
-These fields are safe to display in the UI. Tokens and callback credentials are
-never returned by `list_services`.
-
-### Result descriptors in the UI
-
-When a downstream service supports the results hub, some tool calls will pass
-descriptors such as `{"kind":"gofr.result_ref", ...}` between services.
-Treat those descriptors as internal references only:
-
-- Do not render descriptor JSON as the user-facing answer unless you are
-  building a debug screen.
-- Do not expect descriptors to contain the large payload they refer to.
-- Do not try to resolve descriptors from the browser. Downstream services and
-  gofr-agent handle `_get_result` / `_describe_result` server-side.
-- Reasoning notifications intentionally omit raw payloads such as OHLCV arrays;
-  the descriptor is the only model-visible artifact.
-
-### `ask` — the main tool
-- Args:
-  - `question` (string, required): the user's natural-language question.
-  - `session_id` (string, optional): client-chosen ID. If omitted, the
-    server generates one and returns it. Reuse the same ID for follow-up
-    turns to keep conversation context.
-  - `context` (string, optional): legacy free-text context. When structured
-    caller content is enabled, it is treated as pasted third-party data only.
-  - `instructions` (string, optional): authenticated requester instructions
-    for constraints and output shape.
-  - `asserted_facts` (string array, optional): caller-asserted facts, not
-    authoritative.
-  - `pasted_content` (string array, optional): third-party content treated as
-    data only.
-  - `forbidden_services`, `forbidden_tools`, `allowed_services` (string arrays,
-    optional): runtime tool-use constraints.
-  - `tools_only` (boolean, optional): require factual answers to come from
-    registered tools.
-  - `output_format` (`"json"` or `"text"`, optional): requested answer shape.
-  - `no_commentary` (boolean, optional): request no extra prose.
-  - `max_steps` (int, optional, default 10): hard cap on tool-call
-    iterations the agent is allowed for this question. Increase for
-    complex multi-service questions (20–30 is typical).
-  - `model_override` (string, optional): allow-listed model override.
-    The caller must also hold `AGENT_MODEL_OVERRIDE`.
-- Returns:
-  ```json
-  {
-    "session_id": "ui-session-1",
-    "request_id": "req-123",
-    "answer": "final natural-language answer",
-    "steps": [
-      {"kind": "run_started", "sequence": 1},
-      {"kind": "run_completed", "sequence": 7}
-    ],
-    "model": "deepseek/deepseek-v4-pro",
-    "tokens_used": 1234,
-    "verification_gap": null,
-    "clarification_request": null,
-    "provenance": []
-  }
-  ```
-- **Important**: `ask` still returns its final response only once the run has
-  finished, but the server now emits live reasoning notifications during the
-  run. `steps` is a compact non-text subset derived from that same event
-  sequence. Tool-using runs and summary-compaction runs produce non-empty
-  `steps`.
-  If `verification_gap` is present, show it as a successful run outcome rather
-  than a transport error. If `clarification_request` is present, ask the user
-  for the listed `missing_fields`. If `provenance` is present, verbose/debug
-  views should expose service/tool references and `as_of` freshness values.
-
-### `reset_session`
-- Args: `{ session_id: string }`.
-- Returns: `{ status: "ok", session_id }`.
-- Use for: a "Clear conversation" button.
-
-### `register_service`
-- Args: `{ name, url, token?, description? }`.
-- Returns: `{ status: "registered", name, tools_discovered: <int> }`.
-- Policy: requires runtime registration to be enabled server-side and the target
-  host to match `allowed_service_hosts`.
-- Use for: admin UI only. Most React apps will not need this.
-
-### `refresh_services`
-- Args: none.
-- Use for: admin UI only.
-
----
-
-## 4. Current limitations the React-side LLM must understand
-
-The brief mentions two desired UX features:
-
-1. **Show step-by-step reasoning as it happens.**
-2. **Allow the user to provide additional input mid-run.**
-
-The first is supported; the second is not. Specifically:
-
-- `ask` is still a single request/response for the final payload, but the
-  server emits live MCP reasoning notifications while the run is in flight.
-  Clients that ignore notifications can still rely on the final response.
-- The agent has no "human-in-the-loop" mechanism. Once `ask` is in
-  flight, there is no protocol to send extra input to the running run
-  short of cancelling and starting over with a more detailed prompt
-  (which loses partial work).
-
-**The React-side LLM should not invent client-side workarounds for
-mid-run input.** Do not fake pause/resume semantics that the server does not
-support.
-
-What the React app **can** do today, with no server changes:
-
-- Render a normal chat UI: input box, list of turns, send button.
-- Subscribe to reasoning notifications and render a live reasoning panel.
-- Show a spinner while `ask` is running.
-- Persist `session_id` per chat thread and reuse it across turns.
-- Provide a "Reset" button that calls `reset_session`.
-- Expose a "max steps" advanced setting (default 10, raise for complex
-  queries).
-- Surface `request_id`, `tokens_used`, and `model` from the response as
-  metadata.
-- Catch MCP `McpError` and show the `.message` to the user. Common
-  cases: missing/invalid token (`INVALID_PARAMS`), `tool_calls_limit`
-  exceeded (raise `max_steps`).
-
----
-
-## 5. Current reasoning notification contract and remaining extension
-
-### 5a. Live reasoning notifications (current)
-
-The server now emits reasoning events as MCP logging notifications while
-`ask` runs.
-
-Notification contract:
-
-- MCP notification type: logging/message.
-- Logger: `gofr-agent.reasoning`.
-- Payload: `params.data` is the event object.
-- Correlation: each event includes the same `request_id` returned by the final
-  `ask` response.
-
-Event kinds currently emitted:
-
-| `kind` | Meaning |
-|--------|---------|
-| `run_started` | The `ask` run has started |
-| `step_started` | A logical reasoning/tool step has started |
+| Kind | UI meaning |
+|------|------------|
+| `run_started` | The run began; may include `question` |
+| `step_started` | A thought, tool call, summary, or final-answer step started |
 | `text_delta` | Incremental model text |
-| `tool_call` | The model requested a downstream tool |
-| `tool_retry` | A transient tool failure is being retried |
+| `tool_call` | A downstream tool was requested |
+| `tool_retry` | A transient downstream failure is being retried |
 | `tool_result` | A downstream tool completed |
-| `summary_update` | Older session history was compacted into the rolling summary |
+| `summary_update` | Older session history was compacted |
 | `step_completed` | A logical step finished |
 | `run_completed` | The run finished successfully |
 | `run_failed` | The run failed before completion |
+| `user_input_requested` | A Phase 1A prompt is ready to show |
+| `run_paused` | The logical run is waiting for user input |
+| `user_input_received` | A resume request supplied an answer; raw value is not included |
+| `run_resumed` | The logical run resumed after user input |
+| `user_input_cancelled` | The pending prompt was cancelled |
 
-The final `steps` array in the `ask` response is derived from the same event
-sequence, excluding `text_delta` events.
-
-Shared fields on every event:
-
-| Field | Meaning |
-|-------|---------|
-| `request_id` | Correlates the run across notifications, logs, and final response |
-| `session_id` | Conversation session id |
-| `event_id` | Unique event id |
-| `sequence` | Monotonic event order |
-| `kind` | Event type |
-| `timestamp` | UTC timestamp |
-
-Important payload fields by kind:
-
-| `kind` | Additional fields |
-|--------|-------------------|
-| `tool_call` | `service`, `tool`, `arguments`, `attempt` |
-| `tool_retry` | `service`, `tool`, `attempt`, `message` |
-| `tool_result` | `service`, `tool`, `ok`, `summary`, `attempt`, `latency_ms`, `truncated` |
-| `summary_update` | `summary` |
-| `run_completed` | `model`, `answer_preview`, `tokens_used` |
-| `run_failed` | `error`, `fatal` |
-
-### 5b. Human-in-the-loop input
-
-This is still not implemented. If you need it, request a server-side extension.
-
-One reasonable direction is a future notification type such as:
-
-| `event:` | `data:` payload                                                     |
-|----------|---------------------------------------------------------------------|
-| `prompt` | `{ prompt_id, question, schema?: JSONSchema, choices?: string[] }`  |
-
-The UI would show the question to the user and then send a follow-up response
-back to the server.
-
-One possible API shape:
-
-```
-POST /agent/ask/respond
-  body: { session_id, prompt_id, value }
-  headers: Authorization: Bearer <token>
-```
-
----
-
-## 6. Reference TypeScript snippets
-
-### Chat hook (today's API — final response plus notifications)
-
-This snippet shows both the notification subscription and the final-response
-path using the MCP TypeScript SDK's `setNotificationHandler` API.
+Important event-specific fields:
 
 ```ts
-import { useState, useCallback, useRef } from "react";
+type ToolCallEvent = ReasoningEventBase & {
+  kind: "tool_call";
+  service: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  attempt: number;
+};
+
+type ToolResultEvent = ReasoningEventBase & {
+  kind: "tool_result";
+  service: string;
+  tool: string;
+  ok: boolean;
+  summary: unknown;
+  attempt: number;
+  latency_ms?: number | null;
+  args_hash?: string | null;
+  artifact_id?: string | null;
+  as_of?: string | null;
+};
+
+type RunCompletedEvent = ReasoningEventBase & {
+  kind: "run_completed";
+  model?: string | null;
+  answer_preview?: string | null;
+  tokens_used?: number | null;
+};
+
+type RunFailedEvent = ReasoningEventBase & {
+  kind: "run_failed";
+  error: string;
+  fatal: boolean;
+};
+```
+
+Reasoning event UI rules:
+
+- Sort by `sequence`, not arrival time.
+- Use `event_id` for stable React keys.
+- Show `text_delta` only in an optional live draft area; final `steps` excludes
+  `text_delta` events.
+- Treat `truncated: true` as a signal to show a compact warning.
+- Do not render raw large data as primary UI. Tool summaries are bounded by the
+  server and may be intentionally abbreviated.
+- Tool arguments can contain user data. Put them behind a details disclosure in
+  normal views.
+
+## 8. Human-in-the-loop status
+
+Phase 1A pause/resume is implemented for deterministic missing-field prompts
+that are detected before the LLM run starts. LLM-initiated prompts from inside
+the pydantic-ai run remain Phase 1B.
+
+Config includes:
+
+- `GOFR_AGENT_INTERACTIVE_DEFAULT`
+- `GOFR_AGENT_PENDING_PROMPT_TTL_SECONDS`
+- `GOFR_AGENT_ALLOW_UNAUTHENTICATED_RESUME`
+
+The public MCP `ask` tool accepts `interactive?: boolean`. When interactive is
+enabled and `allow_unauthenticated_resume` is false, the server rejects the call
+before agent execution because `AuthService` does not yet expose a stable
+subject binding. Developer/test deployments can enable
+`GOFR_AGENT_ALLOW_UNAUTHENTICATED_RESUME=true`.
+
+What the UI should do now:
+
+- Send `interactive: true` only when the product wants the Phase 1A waiting
+  flow and the deployment enables resume.
+- Render `clarification_request` from non-interactive final responses as a
+  normal assistant ask-back.
+- Render `user_input_request` from `status: "waiting_for_user"` as a pending
+  prompt tied to `run_id` and `prompt_id`.
+- Submit answers with `respond_to_user_input`, recover pending prompts with
+  `get_pending_user_input`, and abandon them with `cancel_user_input`.
+- Keep the older manual follow-up flow available for deployments where
+  interactive resume is disabled.
+
+## 9. Results hub and descriptors
+
+When `GOFR_AGENT_HUB_ENABLED=true`, `gofr-agent` can act as a process-local
+results hub for descriptor handoff between downstream MCP services.
+
+UI-facing rules:
+
+- Descriptors such as `{"kind":"gofr.result_ref", ...}` are internal
+  references, not user-facing answers.
+- Do not try to resolve result descriptors from the browser.
+- Do not call `_get_result` or `_describe_result` from the UI.
+- Do not expect descriptors to contain the large payload they refer to.
+- Reasoning notifications intentionally avoid streaming raw payloads such as
+  OHLCV arrays.
+- A debug-only view may show descriptor metadata, `artifact_id`, `args_hash`,
+  and `as_of` values when present.
+
+Known hub limitation: the store is in-memory and process-local. Multi-replica
+deployments need sticky routing or a shared store before descriptors are
+portable across replicas.
+
+## 10. Prompt hardening response models
+
+These response fields are present in the `ask` payload and are enabled or
+populated depending on server flags.
+
+```ts
+type VerificationGapReason =
+  | "no_service_registered"
+  | "tool_error"
+  | "empty_result"
+  | "schema_mismatch"
+  | "contradiction"
+  | "policy_denied"
+  | "constraint_blocked"
+  | "max_steps_reached";
+
+type VerificationGapAttempt = {
+  service?: string | null;
+  tool?: string | null;
+  args_summary?: Record<string, unknown> | string | null;
+  outcome: string;
+};
+
+type VerificationGap = {
+  request_id: string;
+  requested_fact: string;
+  attempted: VerificationGapAttempt[];
+  reason: VerificationGapReason;
+  options: string[];
+};
+
+type ClarificationRequest = {
+  request_id: string;
+  question: string;
+  missing_fields: string[];
+  reason: string;
+  prompt: string;
+};
+
+type ProvenanceRecord = {
+  request_id: string;
+  service: string;
+  tool: string;
+  args_hash: string;
+  artifact_id?: string | null;
+  attempt: number;
+  ok: boolean;
+  latency_ms?: number | null;
+  truncated: boolean;
+  as_of?: string | null;
+};
+```
+
+UI behavior:
+
+- `verification_gap`: show a clear non-error state explaining that the agent
+  could not verify the requested fact. Include attempted services/tools in an
+  expandable section.
+- `clarification_request`: render the `prompt` as the assistant response and
+  make `missing_fields` visible in metadata or a structured prompt card.
+- `provenance`: show in a source/details panel, not inline in the main answer.
+- `as_of`: when present, display freshness near the relevant source/tool.
+
+## 11. Recommended React information architecture
+
+Build a compact workbench with these areas:
+
+| Area | Purpose |
+|------|---------|
+| Chat transcript | User and assistant turns, final answers, clarification prompts |
+| Composer | Question input, send button, optional output/constraint controls |
+| Run trace | Live reasoning events for the active turn |
+| Capabilities | Services, tool counts, hub capability, degraded-service warnings |
+| Settings | MCP URL, auth status, max steps, session controls |
+| Metadata | Request id, model, tokens, duration, provenance summary |
+
+Expected controls:
+
+- Icon or icon+text buttons for send, stop/cancel UI state, reset, refresh, and
+  settings.
+- Numeric input or stepper for `maxSteps`.
+- Segmented control for output format: default, text, JSON.
+- Toggles for `toolsOnly` and `noCommentary`.
+- Multi-select or checkboxes for allowed/forbidden services when exposed.
+- Collapsible sections for service tools, reasoning trace, provenance, and raw
+  debug JSON.
+
+Do not put explanatory marketing copy in the main viewport. The first screen
+should let the user ask a question immediately.
+
+## 12. State model the React LLM should implement
+
+Use explicit state rather than deriving everything from text.
+
+```ts
+type ConnectionState =
+  | { status: "idle" }
+  | { status: "checking" }
+  | { status: "connected"; version: string }
+  | { status: "unauthorized"; message: string }
+  | { status: "unavailable"; message: string };
+
+type TurnStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "waiting_for_user"
+  | "verification_gap"
+  | "clarification_requested"
+  | "failed";
+
+type ChatTurn = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  status?: TurnStatus;
+  requestId?: string;
+  model?: string;
+  tokensUsed?: number;
+  events?: ReasoningEvent[];
+  pendingUserInput?: HumanInputRequest | null;
+  verificationGap?: VerificationGap | null;
+  clarificationRequest?: ClarificationRequest | null;
+  provenance?: ProvenanceRecord[];
+  error?: string;
+};
+```
+
+Reducer guidance:
+
+- Keep a `pendingTurnId` for the in-flight user/assistant pair.
+- Before final `request_id` is known, attach notifications to a temporary
+  pending bucket; once `ask` resolves, bind by `request_id`.
+- If a notification includes a `request_id` that already exists, append it to
+  that turn's event list.
+- If `run_failed` arrives, mark the active turn failed but still wait for the
+  `ask` promise to settle so transport errors and model errors are not mixed.
+- Keep local turns separate from server session history. The server stores
+  model-side history by `session_id`; the browser stores display state.
+
+## 13. Reference hook
+
+This is a starting point, not a full app.
+
+```ts
+import { useCallback, useRef, useState } from "react";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-type Turn = { role: "user" | "agent"; text: string };
+type UseGofrAgentOptions = {
+  url: string;
+  token: string;
+  defaultMaxSteps?: number;
+};
 
-export function useGofrAgent(opts: { url: string; token: string }) {
-  const [turns, setTurns] = useState<Turn[]>([]);
+export function useGofrAgent(opts: UseGofrAgentOptions) {
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [services, setServices] = useState<ServiceStatus[]>([]);
   const [busy, setBusy] = useState(false);
-  const [events, setEvents] = useState<Record<string, unknown[]>>({});
   const sessionId = useRef(crypto.randomUUID());
   const clientRef = useRef<Client | null>(null);
+  const pendingAssistantTurnId = useRef<string | null>(null);
 
   const ensureClient = useCallback(async () => {
     if (clientRef.current) return clientRef.current;
+
     const transport = new StreamableHTTPClientTransport(new URL(opts.url), {
       requestInit: { headers: { Authorization: `Bearer ${opts.token}` } },
     });
@@ -369,46 +681,114 @@ export function useGofrAgent(opts: { url: string; token: string }) {
       { name: "gofr-agent-react-ui", version: "0.1.0" },
       { capabilities: {} },
     );
+
     await client.connect(transport);
     await client.setLoggingLevel("info");
     client.setNotificationHandler("notifications/message", notification => {
       if (notification.params?.logger !== "gofr-agent.reasoning") return;
       const payload = notification.params?.data;
       if (!payload || typeof payload !== "object") return;
-      const event = payload as { request_id?: string };
-      const requestId = event.request_id ?? "pending";
-      setEvents(prev => ({
-        ...prev,
-        [requestId]: [...(prev[requestId] ?? []), payload],
-      }));
+      const event = payload as ReasoningEvent;
+      setTurns(prev =>
+        prev.map(turn => {
+          const matchesRequest = turn.requestId && turn.requestId === event.request_id;
+          const matchesPending = !turn.requestId && turn.id === pendingAssistantTurnId.current;
+          if (!matchesRequest && !matchesPending) return turn;
+          return { ...turn, events: [...(turn.events ?? []), event] };
+        }),
+      );
     });
+
     clientRef.current = client;
     return client;
-  }, [opts.url, opts.token]);
+  }, [opts.token, opts.url]);
 
-  const ask = useCallback(async (question: string, maxSteps = 20) => {
-    setTurns(t => [...t, { role: "user", text: question }]);
-    setBusy(true);
-    try {
-      const client = await ensureClient();
-      const res = await client.callTool({
-        name: "ask",
-        arguments: {
-          question,
-          session_id: sessionId.current,
-          max_steps: maxSteps,
-        },
-      });
-      const text = (res.content?.[0] as { text?: string })?.text ?? "{}";
-      const data = JSON.parse(text) as {
-        request_id: string;
-        answer: string;
-      };
-      setTurns(t => [...t, { role: "agent", text: data.answer }]);
-    } finally {
-      setBusy(false);
-    }
+  const refreshServices = useCallback(async () => {
+    const client = await ensureClient();
+    const result = await client.callTool({ name: "list_services", arguments: {} });
+    setServices(parseTextJson<ServiceStatus[]>(result));
   }, [ensureClient]);
+
+  const ask = useCallback(
+    async (question: string, overrides: Partial<AskRequest> = {}) => {
+      const trimmed = question.trim();
+      if (!trimmed) return;
+
+      const userTurn: ChatTurn = {
+        id: crypto.randomUUID(),
+        role: "user",
+        text: trimmed,
+      };
+      const assistantTurn: ChatTurn = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        text: "",
+        status: "running",
+        events: [],
+      };
+      pendingAssistantTurnId.current = assistantTurn.id;
+      setTurns(prev => [...prev, userTurn, assistantTurn]);
+      setBusy(true);
+
+      try {
+        const client = await ensureClient();
+        const result = await client.callTool({
+          name: "ask",
+          arguments: {
+            question: trimmed,
+            session_id: sessionId.current,
+            max_steps: opts.defaultMaxSteps ?? 20,
+            ...overrides,
+          },
+        });
+        const data = parseTextJson<AskResponse>(result);
+        sessionId.current = data.session_id;
+
+        setTurns(prev =>
+          prev.map(turn => {
+            if (turn.id !== assistantTurn.id) return turn;
+            const status = data.status === "waiting_for_user"
+              ? "waiting_for_user"
+              : data.verification_gap
+                ? "verification_gap"
+                : data.clarification_request
+                  ? "clarification_requested"
+                  : "completed";
+            return {
+              ...turn,
+              text:
+                data.answer ||
+                data.user_input_request?.prompt ||
+                data.clarification_request?.prompt ||
+                "",
+              status,
+              requestId: data.request_id,
+              model: data.model,
+              tokensUsed: data.tokens_used,
+              events: data.steps.length > 0 ? data.steps : turn.events,
+              pendingUserInput: data.user_input_request,
+              verificationGap: data.verification_gap,
+              clarificationRequest: data.clarification_request,
+              provenance: data.provenance,
+            };
+          }),
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setTurns(prev =>
+          prev.map(turn =>
+            turn.id === assistantTurn.id
+              ? { ...turn, status: "failed", error: message, text: message }
+              : turn,
+          ),
+        );
+      } finally {
+        pendingAssistantTurnId.current = null;
+        setBusy(false);
+      }
+    },
+    [ensureClient, opts.defaultMaxSteps],
+  );
 
   const reset = useCallback(async () => {
     const client = await ensureClient();
@@ -416,51 +796,124 @@ export function useGofrAgent(opts: { url: string; token: string }) {
       name: "reset_session",
       arguments: { session_id: sessionId.current },
     });
+    sessionId.current = crypto.randomUUID();
+    pendingAssistantTurnId.current = null;
     setTurns([]);
   }, [ensureClient]);
 
-  return { turns, events, busy, ask, reset };
+  return { turns, services, busy, ask, reset, refreshServices };
 }
 ```
 
-The older SSE-based sketch is obsolete. The current server streams reasoning
-over MCP logging notifications, not over a parallel SSE endpoint.
+## 14. Error handling
 
----
+Handle these cases explicitly:
 
-## 7. Suggested phased implementation for the React project
+| Case | Likely cause | UI response |
+|------|--------------|-------------|
+| Missing/invalid token | Bad settings or expired token | Show auth error and settings action |
+| CORS failure | Browser origin not allowed | Show deployment/configuration message |
+| Network failure | Server unreachable | Show reconnect action |
+| `max_steps` rejected | Value exceeds hard cap | Clamp and explain |
+| Tool-call limit reached | Run exhausted configured steps | Suggest retry with higher max steps |
+| Verification gap | Could not verify requested fact | Show gap details, not an error toast |
+| Clarification request | Missing material input | Show ask-back and let user send another turn |
+| `waiting_for_user` | Interactive Phase 1A prompt | Show pending prompt, then call `respond_to_user_input` |
+| Pending prompt expired | Prompt TTL elapsed or process restarted | Clear local pending state and let the user retry |
+| `run_failed` event | Runtime/model/tool failure | Mark active turn failed and preserve trace |
 
-Phase 1 — shipped server capabilities:
+## 15. Build checklist for the React-side LLM
 
-1. Add a settings panel with `url`, `token`, `max_steps`.
-2. Implement the chat hook from §6.
-3. On mount, call `ping` then `list_services`; show the latter in a
-   collapsible "Capabilities" panel so the user can see what data the
-   agent has access to.
-4. Register a logging-notification handler and render incoming reasoning
-   events as a collapsible trace under the active turn.
-5. Show a spinner while `ask` is in flight.
-6. Render `request_id`, `tokens_used`, and `model` as metadata under each
-   agent turn.
+Implement in this order:
 
-Phase 2 — once §5b (human-in-the-loop) is delivered server-side:
+1. Create or locate the React/TypeScript app shell.
+2. Add `@modelcontextprotocol/sdk`.
+3. Add a typed `gofrAgentClient` module with `createGofrClient` and
+   `parseTextJson`.
+4. Add TypeScript types for `AskRequest`, `AskResponse`, `HumanInputRequest`,
+   `ReasoningEvent`, `ServiceStatus`, `VerificationGap`,
+   `ClarificationRequest`, and `ProvenanceRecord`.
+5. Add a reducer or hook for connection, turns, events, services, and settings.
+6. Build the chat transcript and composer.
+7. Add health check and service list loading.
+8. Add live reasoning trace rendering from notifications.
+9. Add reset session.
+10. Add advanced constraints only after the basic chat path works.
+11. Add provenance, verification gap, clarification, and Phase 1A pending
+    prompt rendering.
+12. Add `respond_to_user_input`, `get_pending_user_input`, and
+    `cancel_user_input` client helpers.
+13. Add tests before broad styling work.
 
-7. Add a `<PromptModal>` rendered when `prompt` arrives; resolve its
-   promise with the user's answer to unblock the run.
-8. Persist the prompt history alongside the steps so a turn replay
-    shows the full interaction.
+Do not implement these until backend support exists or the product explicitly
+requests admin features:
 
----
+- LLM-initiated mid-run user-input submission beyond deterministic Phase 1A
+  prompts.
+- Browser-side descriptor resolution.
+- Dynamic service registration in the normal user chat surface.
+- Model override controls for ordinary users.
 
-## 8. Things the React-side LLM should ASK the user before coding
+## 16. Test plan for the React-side LLM
 
-- Where will the React app run (browser? Electron?) and what origin?
-  This determines whether CORS must be configured on gofr-agent.
-- Which token will the app use? Dev (`dev-admin-token`) or a per-user
-  token issued by an existing auth flow?
-- Is Phase 1 acceptable as the first deliverable, or must Phases 2/3
-  ship at the same time (in which case server-side work in §5 must be
-  scheduled first)?
-- Should the chat history persist across browser reloads? If yes, only
-  the `session_id` and the locally rendered turns need to be stored —
-  the server keeps the model-side history under that ID.
+Unit tests:
+
+- `parseTextJson` parses valid MCP text JSON.
+- `parseTextJson` rejects missing text content.
+- Reasoning event reducer appends by pending turn id before `request_id` is
+  known.
+- Reasoning event reducer appends by `request_id` after final response.
+- Event sorting uses `sequence`.
+- `verification_gap` maps to `verification_gap` turn status.
+- `clarification_request` maps to `clarification_requested` turn status.
+- Service list hides or ignores reserved hub tools if they ever appear.
+
+Component tests:
+
+- Initial settings render with URL/token/max steps.
+- Successful `ping` moves connection state to connected.
+- Unauthorized `ping` shows an auth state.
+- `list_services` renders degraded services without crashing.
+- Sending a question appends user and assistant turns.
+- A `tool_call` notification appears in the trace before final answer.
+- Reset calls `reset_session` and clears local turns.
+
+Integration tests with a mocked MCP client:
+
+- `ask` success with live events and final answer.
+- `ask` response containing `verification_gap`.
+- `ask` response containing `clarification_request`.
+- Transport/network error.
+- `run_failed` notification followed by a rejected `ask` promise.
+
+End-to-end tests when a dev server and gofr-agent are available:
+
+1. Configure MCP URL and token.
+2. Verify health is connected.
+3. Verify services load.
+4. Ask `What tools are available?`.
+5. Confirm an assistant answer appears.
+6. Confirm at least one reasoning event or completed step is visible.
+7. Reset the session and confirm the transcript clears.
+
+If changing this Python backend while building the UI, validate backend changes
+with this repository's wrapper, not raw pytest:
+
+```bash
+./scripts/run_tests.sh
+```
+
+For docs-only changes in this repository, at minimum run:
+
+```bash
+git diff --check
+```
+
+## 17. Useful backend references
+
+- MCP server tools: [../app/mcp_server/mcp_server.py](../app/mcp_server/mcp_server.py)
+- Runtime config: [../app/config.py](../app/config.py)
+- Reasoning events: [../app/agent/events.py](../app/agent/events.py)
+- Response contracts: [../app/agent/contracts.py](../app/agent/contracts.py)
+- Current state: [current_state.md](current_state.md)
+- README: [../README.md](../README.md)

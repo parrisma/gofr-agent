@@ -404,6 +404,66 @@ class TestGofrAgentRun:
         assert "ticker" in result.clarification_request.missing_fields
         ga._agent.iter.assert_not_called()
 
+    async def test_interactive_missing_fields_returns_waiting_for_user(self) -> None:
+        config = _make_config(verification_gap_response_enabled=True)
+        reg = _make_registry()
+        ga = GofrAgent(config, reg)
+        ga._agent = MagicMock()
+
+        store = SessionStore()
+        sess = await store.get_or_create("session-1")
+        result = await ga.run("Compute volatility", sess, interactive=True)
+
+        assert result.status == "waiting_for_user"
+        assert result.is_complete is False
+        assert result.answer == ""
+        assert result.clarification_request is None
+        assert result.user_input_request is not None
+        assert result.user_input_request.session_id == "session-1"
+        assert result.user_input_request.run_id == result.run_id
+        assert "ticker" in result.user_input_request.missing_fields
+        assert [step["kind"] for step in result.steps] == [
+            "user_input_requested",
+            "run_paused",
+        ]
+        assert sess.messages == []
+        ga._agent.iter.assert_not_called()
+
+    async def test_interactive_without_missing_fields_runs_normally(self) -> None:
+        config = _make_config(verification_gap_response_enabled=True)
+        reg = _make_registry()
+        ga = GofrAgent(config, reg)
+
+        fake_run = _FakeAgentRun(
+            nodes=[_FakeModelRequestNode(["ok"])],
+            result_output="ok",
+            new_messages=[],
+            total_tokens=0,
+        )
+
+        with patch.multiple(
+            "app.agent.agent",
+            ModelRequestNode=_FakeModelRequestNode,
+            CallToolsNode=_FakeCallToolsNode,
+            FunctionToolCallEvent=_FakeFunctionToolCallEvent,
+            FunctionToolResultEvent=_FakeFunctionToolResultEvent,
+        ):
+            ga._agent = MagicMock()
+            ga._agent.iter = _async_cm(fake_run)
+
+            store = SessionStore()
+            sess = await store.get_or_create(None)
+            result = await ga.run(
+                "Compute returns for AAPL from 2026-01-01 to 2026-02-01",
+                sess,
+                interactive=True,
+            )
+
+        assert result.status == "completed"
+        assert result.is_complete is True
+        assert result.answer == "ok"
+        assert result.user_input_request is None
+
     async def test_run_returns_provenance_when_response_flag_enabled(self) -> None:
         config = _make_config(provenance_in_response_enabled=True)
         reg = _make_registry()

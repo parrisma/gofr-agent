@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from app.auth.permissions import (
     AGENT_ASK,
+    AGENT_CANCEL_USER_INPUT,
+    AGENT_GET_PENDING_USER_INPUT,
     AGENT_HUB_FETCH,
     AGENT_HUB_STORE,
     AGENT_LIST_SERVICES,
@@ -16,6 +18,7 @@ from app.auth.permissions import (
     AGENT_REFRESH_SERVICES,
     AGENT_REGISTER_SERVICE,
     AGENT_RESET_SESSION,
+    AGENT_RESPOND_TO_USER_INPUT,
 )
 
 _ALL = ",".join([
@@ -26,6 +29,9 @@ _ALL = ",".join([
     AGENT_RESET_SESSION,
     AGENT_REGISTER_SERVICE,
     AGENT_REFRESH_SERVICES,
+    AGENT_RESPOND_TO_USER_INPUT,
+    AGENT_GET_PENDING_USER_INPUT,
+    AGENT_CANCEL_USER_INPUT,
     "MCPServer*",
 ])
 

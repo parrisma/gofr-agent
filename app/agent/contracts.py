@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,6 +18,7 @@ VerificationGapReason = Literal[
     "max_steps_reached",
 ]
 
+AgentRunStatus = Literal["completed", "waiting_for_user", "cancelled"]
 OutputFormat = Literal["json", "text"]
 
 
@@ -64,6 +66,28 @@ class ClarificationRequest(StrictContractModel):
     missing_fields: list[str]
     reason: str
     prompt: str
+
+
+class HumanInputRequest(StrictContractModel):
+    """Bounded prompt asking the caller for deterministic missing input."""
+
+    prompt_id: str
+    run_id: str
+    session_id: str
+    prompt: str
+    input_schema: dict[str, Any] | None = None
+    choices: list[str] | None = None
+    created_at: datetime
+    expires_at: datetime
+    missing_fields: list[str] = Field(default_factory=list)
+
+
+class HumanInputResponse(StrictContractModel):
+    """Caller response to a pending human-input prompt."""
+
+    session_id: str
+    prompt_id: str
+    value: Any
 
 
 class ProvenanceRecord(StrictContractModel):

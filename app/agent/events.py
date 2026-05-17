@@ -25,6 +25,7 @@ def _utc_now() -> datetime:
 class BaseReasoningEvent(BaseModel):
     request_id: str
     session_id: str
+    run_id: str | None = None
     event_id: str = Field(default_factory=lambda: str(uuid4()))
     sequence: int = 0
     kind: str
@@ -101,6 +102,34 @@ class RunFailedEvent(BaseReasoningEvent):
     fatal: bool = True
 
 
+class UserInputRequestedEvent(BaseReasoningEvent):
+    kind: Literal["user_input_requested"] = "user_input_requested"
+    prompt_id: str
+    prompt: str
+    missing_fields: list[str] = Field(default_factory=list)
+
+
+class RunPausedEvent(BaseReasoningEvent):
+    kind: Literal["run_paused"] = "run_paused"
+    prompt_id: str
+
+
+class UserInputReceivedEvent(BaseReasoningEvent):
+    kind: Literal["user_input_received"] = "user_input_received"
+    prompt_id: str
+
+
+class RunResumedEvent(BaseReasoningEvent):
+    kind: Literal["run_resumed"] = "run_resumed"
+    prompt_id: str
+
+
+class UserInputCancelledEvent(BaseReasoningEvent):
+    kind: Literal["user_input_cancelled"] = "user_input_cancelled"
+    prompt_id: str
+    reason: str | None = None
+
+
 ReasoningEvent: TypeAlias = (
     RunStartedEvent
     | StepStartedEvent
@@ -112,6 +141,11 @@ ReasoningEvent: TypeAlias = (
     | StepCompletedEvent
     | RunCompletedEvent
     | RunFailedEvent
+    | UserInputRequestedEvent
+    | RunPausedEvent
+    | UserInputReceivedEvent
+    | RunResumedEvent
+    | UserInputCancelledEvent
 )
 
 
@@ -151,11 +185,13 @@ class EventCollector:
         request_id: str,
         session_id: str,
         *,
+        run_id: str | None = None,
         max_payload_chars: int = 4000,
         max_response_steps: int = 200,
     ) -> None:
         self.request_id = request_id
         self.session_id = session_id
+        self.run_id = run_id
         self.max_payload_chars = max_payload_chars
         self.max_response_steps = max_response_steps
         self._sequence = 0
@@ -171,6 +207,7 @@ class EventCollector:
             update={
                 "request_id": self.request_id,
                 "session_id": self.session_id,
+                "run_id": event.run_id or self.run_id,
                 "sequence": self._sequence,
             }
         ).model_dump(mode="json")

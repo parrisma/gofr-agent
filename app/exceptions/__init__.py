@@ -6,6 +6,7 @@ Hierarchy:
     ├── ToolDiscoveryError      — failed tool list from downstream
     ├── SessionNotFoundError    — unknown session_id supplied by caller
     ├── SessionCapacityError    — session limit reached
+    ├── PendingUserInputExistsError — unresolved pending user prompt exists
     ├── ToolResultTruncatedWarning — informational; not raised to callers
     └── ConfigurationError      — invalid startup configuration
 """
@@ -29,6 +30,10 @@ class SessionNotFoundError(GofrAgentError):
 
 class SessionCapacityError(GofrAgentError):
     """Raised when creating a new session would exceed the session limit."""
+
+
+class PendingUserInputExistsError(GofrAgentError):
+    """Raised when a session already has unresolved pending user input."""
 
 
 class ServiceRegistrationPolicyError(GofrAgentError):

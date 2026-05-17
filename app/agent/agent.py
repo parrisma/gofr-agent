@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from pydantic_ai import Agent, CallToolsNode, ModelRequestNode, UsageLimitExceeded
 from pydantic_ai.messages import (
@@ -19,7 +22,9 @@ from pydantic_graph import End
 
 from app.agent.context import assemble_structured_prompt, build_caller_content
 from app.agent.contracts import (
+    AgentRunStatus,
     ClarificationRequest,
+    HumanInputRequest,
     IntentConstraints,
     ProvenanceRecord,
     VerificationGap,
@@ -30,6 +35,7 @@ from app.agent.events import (
     EventSink,
     RunCompletedEvent,
     RunFailedEvent,
+    RunPausedEvent,
     RunStartedEvent,
     StepCompletedEvent,
     StepStartedEvent,
@@ -38,6 +44,7 @@ from app.agent.events import (
     ToolCallEvent,
     ToolResultEvent,
     ToolRetryEvent,
+    UserInputRequestedEvent,
 )
 from app.agent.grounding import assess_grounding
 from app.agent.intent import build_intent_constraints
@@ -76,6 +83,10 @@ class AgentResult:
     steps: list[dict[str, Any]] = field(default_factory=list)
     model: str = ""
     tokens_used: int = 0
+    status: AgentRunStatus = "completed"
+    is_complete: bool = True
+    run_id: str | None = None
+    user_input_request: HumanInputRequest | None = None
     verification_gap: VerificationGap | None = None
     clarification_request: ClarificationRequest | None = None
     provenance: list[ProvenanceRecord] = field(default_factory=list)
@@ -223,6 +234,7 @@ class GofrAgent:
         no_commentary: bool | None = None,
         max_steps: int = 10,
         model_override: str | None = None,
+        interactive: bool = False,
         event_sink: EventSink | None = None,
         on_step: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AgentResult:
@@ -239,6 +251,8 @@ class GofrAgent:
             pasted_content: Third-party content to treat as data only.
             max_steps: Maximum tool-call iterations.
             model_override: Optional per-request model selection.
+            interactive: Whether deterministic clarification should pause for
+                         user input instead of ending the turn.
             event_sink: Collector/notifier abstraction for reasoning events.
             on_step: Optional callback for each emitted event payload.
 
@@ -293,6 +307,49 @@ class GofrAgent:
                     question=question,
                     missing_fields=missing_fields,
                 )
+                if interactive:
+                    run_id = str(uuid4())
+                    created_at = datetime.now(UTC)
+                    expires_at = created_at + timedelta(
+                        seconds=self._config.pending_prompt_ttl_seconds
+                    )
+                    user_input_request = HumanInputRequest(
+                        prompt_id=secrets.token_urlsafe(24),
+                        run_id=run_id,
+                        session_id=session.session_id,
+                        prompt=clarification.prompt,
+                        created_at=created_at,
+                        expires_at=expires_at,
+                        missing_fields=missing_fields,
+                    )
+                    await event_sink.emit(
+                        UserInputRequestedEvent(
+                            request_id=request_id,
+                            session_id=session.session_id,
+                            run_id=run_id,
+                            prompt_id=user_input_request.prompt_id,
+                            prompt=user_input_request.prompt,
+                            missing_fields=missing_fields,
+                        )
+                    )
+                    await event_sink.emit(
+                        RunPausedEvent(
+                            request_id=request_id,
+                            session_id=session.session_id,
+                            run_id=run_id,
+                            prompt_id=user_input_request.prompt_id,
+                        )
+                    )
+                    return AgentResult(
+                        answer="",
+                        steps=event_sink.build_steps(),
+                        model=self._config.llm_model,
+                        tokens_used=0,
+                        status="waiting_for_user",
+                        is_complete=False,
+                        run_id=run_id,
+                        user_input_request=user_input_request,
+                    )
                 await event_sink.emit(
                     RunCompletedEvent(
                         request_id=request_id,

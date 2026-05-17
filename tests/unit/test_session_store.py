@@ -7,8 +7,35 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.exceptions import SessionCapacityError, SessionNotFoundError
+from app.agent.contracts import HumanInputRequest
+from app.exceptions import (
+    PendingUserInputExistsError,
+    SessionCapacityError,
+    SessionNotFoundError,
+)
+from app.sessions.backend import PendingAskPayload, PendingUserInput
 from app.sessions.store import Session, SessionStore
+
+
+def _pending(prompt_id: str = "prompt-1") -> PendingUserInput:
+    created = datetime.now(UTC)
+    return PendingUserInput(
+        prompt_id=prompt_id,
+        run_id="run-1",
+        request_id="req-1",
+        human_input_request=HumanInputRequest(
+            prompt_id=prompt_id,
+            run_id="run-1",
+            session_id="sess-1",
+            prompt="Need ticker.",
+            created_at=created,
+            expires_at=created + timedelta(minutes=10),
+            missing_fields=["ticker"],
+        ),
+        resume_payload=PendingAskPayload(question="Compute returns"),
+        created_at=created,
+        expires_at=created + timedelta(minutes=10),
+    )
 
 
 class TestGetOrCreate:
@@ -67,6 +94,77 @@ class TestClear:
         assert sess.messages == []
         assert sess.summary == ""
 
+    async def test_clear_removes_pending_user_input(self) -> None:
+        store = SessionStore()
+        sess = await store.get_or_create("sess-1")
+        await store.set_pending_user_input(sess.session_id, _pending())
+
+        await store.clear(sess.session_id)
+
+        assert sess.pending_user_input is None
+
+
+class TestPendingUserInput:
+    async def test_set_and_get_pending_user_input(self) -> None:
+        store = SessionStore()
+        sess = await store.get_or_create("sess-1")
+        pending = _pending()
+
+        await store.set_pending_user_input(sess.session_id, pending)
+
+        assert await store.get_pending_user_input(sess.session_id) is pending
+
+    async def test_set_second_pending_rejects(self) -> None:
+        store = SessionStore()
+        sess = await store.get_or_create("sess-1")
+        await store.set_pending_user_input(sess.session_id, _pending("prompt-1"))
+
+        with pytest.raises(PendingUserInputExistsError):
+            await store.set_pending_user_input(sess.session_id, _pending("prompt-2"))
+
+    async def test_pop_pending_user_input_matches_prompt_id(self) -> None:
+        store = SessionStore()
+        sess = await store.get_or_create("sess-1")
+        pending = _pending("prompt-1")
+        await store.set_pending_user_input(sess.session_id, pending)
+
+        popped = await store.pop_pending_user_input(sess.session_id, "prompt-1")
+
+        assert popped is pending
+        assert sess.pending_user_input is None
+
+    async def test_pop_pending_user_input_preserves_mismatch(self) -> None:
+        store = SessionStore()
+        sess = await store.get_or_create("sess-1")
+        pending = _pending("prompt-1")
+        await store.set_pending_user_input(sess.session_id, pending)
+
+        popped = await store.pop_pending_user_input(sess.session_id, "prompt-2")
+
+        assert popped is None
+        assert sess.pending_user_input is pending
+
+    async def test_clear_pending_user_input_matches_prompt_id(self) -> None:
+        store = SessionStore()
+        sess = await store.get_or_create("sess-1")
+        await store.set_pending_user_input(sess.session_id, _pending("prompt-1"))
+
+        cleared = await store.clear_pending_user_input(sess.session_id, "prompt-1")
+
+        assert cleared is True
+        assert sess.pending_user_input is None
+
+    async def test_clear_pending_user_input_preserves_mismatch(self) -> None:
+        store = SessionStore()
+        sess = await store.get_or_create("sess-1")
+        pending = _pending("prompt-1")
+        await store.set_pending_user_input(sess.session_id, pending)
+
+        cleared = await store.clear_pending_user_input(sess.session_id, "prompt-2")
+
+        assert cleared is False
+        assert sess.pending_user_input is pending
+
 
 class TestDelete:
     async def test_delete_removes_session(self) -> None:
@@ -113,6 +211,19 @@ class TestSweepExpired:
         assert removed == 1
         assert old.session_id not in store._sessions
         assert new.session_id in store._sessions
+
+    async def test_clears_expired_pending_prompt_on_live_session(self) -> None:
+        store = SessionStore(ttl_minutes=60)
+        sess = await store.get_or_create("sess-1")
+        pending = _pending("prompt-1")
+        pending.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await store.set_pending_user_input(sess.session_id, pending)
+
+        removed = await store.sweep_expired()
+
+        assert removed == 0
+        assert sess.session_id in store._sessions
+        assert sess.pending_user_input is None
 
 
 class TestCapacityAndSummary:

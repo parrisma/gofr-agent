@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from typing import Any
 
 import typer
@@ -90,6 +91,11 @@ def ask(
         "--no-commentary",
         help="Ask for no extra commentary in the final answer.",
     ),
+    interactive: bool = typer.Option(
+        False,
+        "--interactive",
+        help="Pause and resume deterministic clarification prompts when supported.",
+    ),
     quiet: bool = typer.Option(
         False,
         "--quiet",
@@ -134,6 +140,7 @@ def ask(
             allowed_services=allowed_service,
             tools_only=tools_only,
             no_commentary=no_commentary,
+            interactive=interactive,
             quiet=quiet,
             verbose=verbose,
             output_format=output_format,
@@ -157,6 +164,7 @@ async def _run(
     allowed_services: list[str] | None,
     tools_only: bool,
     no_commentary: bool,
+    interactive: bool,
     quiet: bool,
     verbose: bool,
     output_format: str,
@@ -215,9 +223,13 @@ async def _run(
             params["tools_only"] = True
         if no_commentary:
             params["no_commentary"] = True
+        if interactive:
+            params["interactive"] = True
 
         result = await client.call_tool("ask", params)
         payload = _extract_result_payload(result)
+        if output_format == "text" and payload.get("status") == "waiting_for_user":
+            payload = await _prompt_and_resume(client, payload)
 
     if output_format == "text" and not quiet:
         renderer.finish()
@@ -227,6 +239,47 @@ async def _run(
         return
 
     _print_payload(payload, quiet=quiet)
+    if payload.get("status") == "waiting_for_user":
+        raise typer.Exit(code=2)
+
+
+async def _prompt_and_resume(
+    client: ClientSession,
+    payload: dict[str, Any],
+    *,
+    max_prompt_loops: int = 5,
+) -> dict[str, Any]:
+    current = payload
+    for _ in range(max_prompt_loops):
+        if current.get("status") != "waiting_for_user":
+            return current
+        if not _stdin_is_tty():
+            return current
+
+        request = current.get("user_input_request")
+        if not isinstance(request, dict):
+            return current
+        session_id = current.get("session_id")
+        prompt_id = request.get("prompt_id")
+        if not isinstance(session_id, str) or not isinstance(prompt_id, str):
+            return current
+
+        prompt = str(request.get("prompt") or "Response")
+        value = typer.prompt(prompt, default="", show_default=False)
+        result = await client.call_tool(
+            "respond_to_user_input",
+            {
+                "session_id": session_id,
+                "prompt_id": prompt_id,
+                "value": value,
+            },
+        )
+        current = _extract_result_payload(result)
+    return current
+
+
+def _stdin_is_tty() -> bool:
+    return sys.stdin.isatty()
 
 
 def _extract_result_payload(result: object) -> dict[str, Any]:
@@ -243,6 +296,10 @@ def _extract_result_payload(result: object) -> dict[str, Any]:
 
 
 def _print_payload(payload: dict[str, Any], *, quiet: bool) -> None:
+    if payload.get("status") == "waiting_for_user":
+        _print_waiting_payload(payload, quiet=quiet)
+        return
+
     answer = payload.get("answer")
     if answer is None:
         raw_text = payload.get("raw_text")
@@ -263,6 +320,27 @@ def _print_payload(payload: dict[str, Any], *, quiet: bool) -> None:
         typer.echo(f"Session: {payload['session_id']}")
     if payload.get("tokens_used"):
         typer.echo(f"Tokens: {payload['tokens_used']}")
+
+
+def _print_waiting_payload(payload: dict[str, Any], *, quiet: bool) -> None:
+    request = payload.get("user_input_request")
+    prompt = None
+    prompt_id = None
+    if isinstance(request, dict):
+        prompt = request.get("prompt")
+        prompt_id = request.get("prompt_id")
+
+    if quiet:
+        typer.echo(str(prompt or "waiting_for_user"))
+        return
+
+    typer.echo("\nWaiting for user input")
+    if prompt:
+        typer.echo(str(prompt))
+    if payload.get("session_id"):
+        typer.echo(f"Session: {payload['session_id']}")
+    if prompt_id:
+        typer.echo(f"Prompt ID: {prompt_id}")
 
 
 def _print_gap_or_clarification(payload: dict[str, Any]) -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from app.auth import (
     AGENT_ASK,
+    AGENT_CANCEL_USER_INPUT,
+    AGENT_GET_PENDING_USER_INPUT,
     AGENT_HUB_FETCH,
     AGENT_HUB_REGISTER,
     AGENT_HUB_STORE,
@@ -13,6 +15,7 @@ from app.auth import (
     AGENT_REFRESH_SERVICES,
     AGENT_REGISTER_SERVICE,
     AGENT_RESET_SESSION,
+    AGENT_RESPOND_TO_USER_INPUT,
     ALL_ACTIVITIES,
     AuthService,
     FailClosedAuthService,
@@ -47,9 +50,12 @@ class TestAuthPublicSurface:
         assert AGENT_HUB_STORE == "GoFRAgentHubStore"
         assert AGENT_HUB_FETCH == "GoFRAgentHubFetch"
         assert AGENT_HUB_REGISTER == "GoFRAgentHubRegister"
+        assert AGENT_RESPOND_TO_USER_INPUT == "GoFRAgentRespondToUserInput"
+        assert AGENT_GET_PENDING_USER_INPUT == "GoFRAgentGetPendingUserInput"
+        assert AGENT_CANCEL_USER_INPUT == "GoFRAgentCancelUserInput"
 
     def test_all_activities_list(self) -> None:
-        assert len(ALL_ACTIVITIES) == 10
+        assert len(ALL_ACTIVITIES) == 13
 
     def test_helpers_callable(self) -> None:
         assert callable(downstream_activity)

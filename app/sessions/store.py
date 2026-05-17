@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from app.exceptions import SessionCapacityError, SessionNotFoundError
+from app.exceptions import (
+    PendingUserInputExistsError,
+    SessionCapacityError,
+    SessionNotFoundError,
+)
 from app.logger import get_logger
 from app.request_context import request_log_fields
-from app.sessions.backend import InMemorySessionBackend, Session, SessionBackend
+from app.sessions.backend import (
+    InMemorySessionBackend,
+    PendingUserInput,
+    Session,
+    SessionBackend,
+)
 
 logger = get_logger("gofr-agent.sessions")
 
@@ -84,6 +94,68 @@ class SessionStore:
             await self._backend.delete(session_id)
 
     # ------------------------------------------------------------------
+    # Pending user input
+    # ------------------------------------------------------------------
+
+    async def set_pending_user_input(
+        self,
+        session_id: str,
+        pending: PendingUserInput,
+    ) -> None:
+        async with self._lock:
+            session = await self._backend.get(session_id)
+            if session is None:
+                raise SessionNotFoundError(f"Session '{session_id}' not found.")
+        async with session.lock:
+            if session.pending_user_input is not None:
+                raise PendingUserInputExistsError(
+                    f"Session '{session_id}' already has pending user input."
+                )
+            session.pending_user_input = pending
+            session.touch()
+
+    async def get_pending_user_input(self, session_id: str) -> PendingUserInput | None:
+        async with self._lock:
+            session = await self._backend.get(session_id)
+            if session is None:
+                return None
+        async with session.lock:
+            session.touch()
+            return session.pending_user_input
+
+    async def pop_pending_user_input(
+        self,
+        session_id: str,
+        prompt_id: str,
+    ) -> PendingUserInput | None:
+        async with self._lock:
+            session = await self._backend.get(session_id)
+            if session is None:
+                return None
+        async with session.lock:
+            pending = session.pending_user_input
+            if pending is None or not hmac.compare_digest(pending.prompt_id, prompt_id):
+                session.touch()
+                return None
+            session.pending_user_input = None
+            session.touch()
+            return pending
+
+    async def clear_pending_user_input(self, session_id: str, prompt_id: str) -> bool:
+        async with self._lock:
+            session = await self._backend.get(session_id)
+            if session is None:
+                return False
+        async with session.lock:
+            pending = session.pending_user_input
+            if pending is None or not hmac.compare_digest(pending.prompt_id, prompt_id):
+                session.touch()
+                return False
+            session.pending_user_input = None
+            session.touch()
+            return True
+
+    # ------------------------------------------------------------------
     # TTL sweep
     # ------------------------------------------------------------------
 
@@ -100,6 +172,15 @@ class SessionStore:
                 for sess in sessions
                 if sess.last_active < cutoff
             ]
+            now = datetime.now(UTC)
+            for sess in sessions:
+                if sess.session_id in expired:
+                    continue
+                async with sess.lock:
+                    pending = sess.pending_user_input
+                    if pending is not None and pending.expires_at <= now:
+                        sess.pending_user_input = None
+                        sess.touch()
             for sid in expired:
                 await self._backend.delete(sid)
         if expired:

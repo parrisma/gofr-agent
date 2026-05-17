@@ -49,6 +49,9 @@ class GofrAgentConfig(BaseModel):
     tool_result_max_chars: int = 4000
     tool_retry_attempts: int = 2
     session_pool_size: int = 3
+    interactive_default: bool = False
+    pending_prompt_ttl_seconds: int = Field(default=600, ge=1)
+    allow_unauthenticated_resume: bool = False
     dynamic_registration_enabled: bool = False
     allowed_service_hosts: list[str] = Field(default_factory=list)
     allowed_models: list[str] = Field(default_factory=list)
@@ -148,6 +151,12 @@ class GofrAgentConfig(BaseModel):
             tool_result_max_chars=int(_get("TOOL_RESULT_MAX_CHARS", "4000")),
             tool_retry_attempts=int(_get("TOOL_RETRY_ATTEMPTS", "2")),
             session_pool_size=int(_get("SESSION_POOL_SIZE", "3")),
+            interactive_default=_get_bool("INTERACTIVE_DEFAULT", False),
+            pending_prompt_ttl_seconds=int(_get("PENDING_PROMPT_TTL_SECONDS", "600")),
+            allow_unauthenticated_resume=_get_bool(
+                "ALLOW_UNAUTHENTICATED_RESUME",
+                False,
+            ),
             dynamic_registration_enabled=_get_bool(
                 "DYNAMIC_REGISTRATION_ENABLED",
                 False,

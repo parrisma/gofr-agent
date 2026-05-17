@@ -8,6 +8,8 @@ from app.auth._dev_auth_service import DevAuthService
 from app.auth.auth_service import FailClosedAuthService
 from app.auth.permissions import (
     AGENT_ASK,
+    AGENT_CANCEL_USER_INPUT,
+    AGENT_GET_PENDING_USER_INPUT,
     AGENT_HUB_FETCH,
     AGENT_HUB_REGISTER,
     AGENT_HUB_STORE,
@@ -17,6 +19,7 @@ from app.auth.permissions import (
     AGENT_REFRESH_SERVICES,
     AGENT_REGISTER_SERVICE,
     AGENT_RESET_SESSION,
+    AGENT_RESPOND_TO_USER_INPUT,
     ALL_ACTIVITIES,
     downstream_activity,
     is_authorised,
@@ -40,6 +43,9 @@ class TestActivityConstants:
             AGENT_HUB_STORE,
             AGENT_HUB_FETCH,
             AGENT_HUB_REGISTER,
+            AGENT_RESPOND_TO_USER_INPUT,
+            AGENT_GET_PENDING_USER_INPUT,
+            AGENT_CANCEL_USER_INPUT,
         }
         assert set(ALL_ACTIVITIES) == expected
 
@@ -54,6 +60,9 @@ class TestActivityConstants:
         assert AGENT_HUB_STORE == "GoFRAgentHubStore"
         assert AGENT_HUB_FETCH == "GoFRAgentHubFetch"
         assert AGENT_HUB_REGISTER == "GoFRAgentHubRegister"
+        assert AGENT_RESPOND_TO_USER_INPUT == "GoFRAgentRespondToUserInput"
+        assert AGENT_GET_PENDING_USER_INPUT == "GoFRAgentGetPendingUserInput"
+        assert AGENT_CANCEL_USER_INPUT == "GoFRAgentCancelUserInput"
 
 
 class TestDevAuthServiceHubTokens:
@@ -75,6 +84,28 @@ class TestDevAuthServiceHubTokens:
         )
 
         assert activities == {AGENT_HUB_STORE, AGENT_HUB_FETCH}
+
+    def test_admin_token_grants_user_input_activities(self) -> None:
+        service = DevAuthService()
+
+        activities = parse_authorised_activities(
+            service.authorised_activities("dev-admin-token")
+        )
+
+        assert AGENT_RESPOND_TO_USER_INPUT in activities
+        assert AGENT_GET_PENDING_USER_INPUT in activities
+        assert AGENT_CANCEL_USER_INPUT in activities
+
+    def test_read_token_does_not_grant_user_input_activities(self) -> None:
+        service = DevAuthService()
+
+        activities = parse_authorised_activities(
+            service.authorised_activities("dev-read-token")
+        )
+
+        assert AGENT_RESPOND_TO_USER_INPUT not in activities
+        assert AGENT_GET_PENDING_USER_INPUT not in activities
+        assert AGENT_CANCEL_USER_INPUT not in activities
 
 
 class TestParseAuthorisedActivities:
@@ -140,6 +171,19 @@ class TestIsAuthorised:
         svc = DummyAuthService()
         activity = downstream_activity("my-svc", "my-tool")
         assert not is_authorised(svc, "dev-read-token", activity)
+
+    def test_admin_token_authorised_for_user_input_activities(self) -> None:
+        svc = DummyAuthService()
+
+        assert is_authorised(svc, "dev-admin-token", AGENT_RESPOND_TO_USER_INPUT)
+        assert is_authorised(svc, "dev-admin-token", AGENT_GET_PENDING_USER_INPUT)
+        assert is_authorised(svc, "dev-admin-token", AGENT_CANCEL_USER_INPUT)
+
+    def test_read_token_denied_for_user_input_resume(self) -> None:
+        svc = DummyAuthService()
+
+        assert not is_authorised(svc, "dev-read-token", AGENT_RESPOND_TO_USER_INPUT)
+        assert not is_authorised(svc, "dev-read-token", AGENT_CANCEL_USER_INPUT)
 
     def test_type_error_for_non_auth_service(self) -> None:
         with pytest.raises(TypeError):

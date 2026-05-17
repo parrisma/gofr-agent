@@ -63,6 +63,9 @@ class TestGofrAgentConfig:
         assert cfg.tool_result_max_chars == 4000
         assert cfg.tool_retry_attempts == 2
         assert cfg.session_pool_size == 3
+        assert cfg.interactive_default is False
+        assert cfg.pending_prompt_ttl_seconds == 600
+        assert cfg.allow_unauthenticated_resume is False
         assert cfg.dynamic_registration_enabled is False
         assert cfg.allowed_service_hosts == []
         assert cfg.allowed_models == []
@@ -98,6 +101,9 @@ class TestGofrAgentConfig:
             "GOFR_AGENT_TOOL_RESULT_MAX_CHARS": "2000",
             "GOFR_AGENT_TOOL_RETRY_ATTEMPTS": "4",
             "GOFR_AGENT_SESSION_POOL_SIZE": "5",
+            "GOFR_AGENT_INTERACTIVE_DEFAULT": "true",
+            "GOFR_AGENT_PENDING_PROMPT_TTL_SECONDS": "120",
+            "GOFR_AGENT_ALLOW_UNAUTHENTICATED_RESUME": "true",
             "GOFR_AGENT_DYNAMIC_REGISTRATION_ENABLED": "true",
             "GOFR_AGENT_ALLOWED_SERVICE_HOSTS": "gofr-*,example.internal",
             "GOFR_AGENT_ALLOWED_MODELS": "openai:gpt-4o-mini,deepseek/deepseek-v4-pro",
@@ -132,6 +138,9 @@ class TestGofrAgentConfig:
         assert cfg.tool_result_max_chars == 2000
         assert cfg.tool_retry_attempts == 4
         assert cfg.session_pool_size == 5
+        assert cfg.interactive_default is True
+        assert cfg.pending_prompt_ttl_seconds == 120
+        assert cfg.allow_unauthenticated_resume is True
         assert cfg.dynamic_registration_enabled is True
         assert cfg.allowed_service_hosts == ["gofr-*", "example.internal"]
         assert cfg.allowed_models == ["openai:gpt-4o-mini", "deepseek/deepseek-v4-pro"]
@@ -152,6 +161,10 @@ class TestGofrAgentConfig:
     def test_hub_enabled_requires_hub_url(self) -> None:
         with pytest.raises(ValidationError, match="hub_url"):
             GofrAgentConfig.from_env(env={"GOFR_AGENT_HUB_ENABLED": "true"})
+
+    def test_pending_prompt_ttl_must_be_positive(self) -> None:
+        with pytest.raises(ValidationError, match="pending_prompt_ttl_seconds"):
+            GofrAgentConfig(pending_prompt_ttl_seconds=0)
 
     @pytest.mark.parametrize(
         "hub_url",
