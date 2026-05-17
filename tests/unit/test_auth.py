@@ -6,6 +6,7 @@ from app.auth import (
     AGENT_ASK,
     AGENT_CANCEL_USER_INPUT,
     AGENT_GET_PENDING_USER_INPUT,
+    AGENT_HEALTH_CHECK,
     AGENT_HUB_FETCH,
     AGENT_HUB_REGISTER,
     AGENT_HUB_STORE,
@@ -41,6 +42,7 @@ class TestAuthPublicSurface:
 
     def test_constants_importable(self) -> None:
         assert AGENT_PING == "GoFRAgentPing"
+        assert AGENT_HEALTH_CHECK == "GoFRAgentHealthCheck"
         assert AGENT_LIST_SERVICES == "GoFRAgentListServices"
         assert AGENT_ASK == "GoFRAgentAsk"
         assert AGENT_MODEL_OVERRIDE == "GoFRAgentModelOverride"
@@ -55,7 +57,7 @@ class TestAuthPublicSurface:
         assert AGENT_CANCEL_USER_INPUT == "GoFRAgentCancelUserInput"
 
     def test_all_activities_list(self) -> None:
-        assert len(ALL_ACTIVITIES) == 13
+        assert len(ALL_ACTIVITIES) == 14
 
     def test_helpers_callable(self) -> None:
         assert callable(downstream_activity)

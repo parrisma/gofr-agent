@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import threading
 
+import httpx
 import pytest
 import uvicorn
-from gofr_common.web import AuthHeaderMiddleware
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from app.agent.agent import GofrAgent
 from app.auth import ALL_ACTIVITIES
 from app.config import GofrAgentConfig
+from app.main_mcp import create_agent_asgi_app
 from app.mcp_server.mcp_server import create_mcp_server
 from app.services import ServiceConfig, ServicesManifest
 from app.services.registry import ServiceHubCapabilities, ServiceRegistry
@@ -78,7 +79,7 @@ async def agent_server(mock_mcp_url: str) -> str:
     session_store = SessionStore(ttl_minutes=60)
 
     mcp = create_mcp_server(config, registry, agent, session_store, _AllowAll())
-    app = AuthHeaderMiddleware(mcp.streamable_http_app())
+    app = create_agent_asgi_app(mcp, config, registry, agent)
 
     port = _free_port()
     host = "127.0.0.1"
@@ -113,7 +114,7 @@ async def agent_server_with_hub_capabilities(mock_mcp_url: str) -> str:
     session_store = SessionStore(ttl_minutes=60)
 
     mcp = create_mcp_server(config, registry, agent, session_store, _AllowAll())
-    app = AuthHeaderMiddleware(mcp.streamable_http_app())
+    app = create_agent_asgi_app(mcp, config, registry, agent)
 
     port = _free_port()
     host = "127.0.0.1"
@@ -143,6 +144,22 @@ class TestMCPServerIntegration:
 
         data = json.loads(result.content[0].text)  # type: ignore[union-attr]
         assert data["status"] == "ok"
+        assert data["service"] == "gofr-agent"
+
+    async def test_health_check_tool(self, agent_server: str) -> None:
+        async with (
+            streamablehttp_client(agent_server, headers=_HEADERS) as (read, write, _),
+            ClientSession(read, write) as client,
+        ):
+            await client.initialize()
+            result = await client.call_tool("health_check", {})
+        import json
+
+        data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+        assert data["status"] == "healthy"
+        assert data["service"] == "gofr-agent"
+        assert data["config"]["models"]["selected"] == "test"
+        assert data["downstream_services"]["total"] == 1
 
     async def test_list_services_tool(self, agent_server: str) -> None:
         async with (
@@ -230,6 +247,32 @@ class TestMCPServerIntegration:
         assert all(event["request_id"] == data["request_id"] for event in notifications)
         expected_steps = [event for event in notifications if event["kind"] != "text_delta"]
         assert data["steps"] == expected_steps
+
+    async def test_http_ping_without_token(self, agent_server: str) -> None:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(agent_server.removesuffix("/mcp") + "/ping")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["service"] == "gofr-agent"
+
+    async def test_http_health_without_token(self, agent_server: str) -> None:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(agent_server.removesuffix("/mcp") + "/health")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "healthy"
+        assert data["service"] == "gofr-agent"
+        assert data["downstream"] == {
+            "total": 1,
+            "healthy": 1,
+            "degraded": 0,
+            "failed": 0,
+        }
+        assert "config" not in data
+        assert "items" not in data["downstream"]
 
     async def test_reset_session_tool(self, agent_server: str) -> None:
         async with (

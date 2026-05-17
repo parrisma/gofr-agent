@@ -11,7 +11,8 @@ each surface.
 
 | Surface | Current state | Canonical docs |
 |---------|---------------|----------------|
-| MCP server | FastMCP Streamable HTTP server exposes `ping`, `list_services`, `ask`, `reset_session`, `register_service`, `refresh_services`, and model-hidden hub tools. | [README.md](../README.md), [master_specification.md](master_specification.md) |
+| MCP server | FastMCP Streamable HTTP server exposes `ping`, `health_check`, `list_services`, `ask`, `reset_session`, `register_service`, `refresh_services`, and model-hidden hub tools. | [README.md](../README.md), [master_specification.md](master_specification.md) |
+| HTTP health | Uvicorn app exposes unauthenticated `GET /ping` and `GET /health` for process reachability and compact orchestrator readiness. | [README.md](../README.md), [master_specification.md](master_specification.md) |
 | Service registry | Loads YAML/env service manifests, discovers MCP tools, maintains per-service pools, continues in degraded mode when startup services fail, and supports guarded runtime registration. | [master_specification.md](master_specification.md), [archive/reasoning_stream_spec.md](archive/reasoning_stream_spec.md) |
 | Reasoning stream | `ask` emits live MCP `notifications/message` events with logger `gofr-agent.reasoning`; final `steps` are derived from the same event stream. | [archive/reasoning_stream_spec.md](archive/reasoning_stream_spec.md), [react_integration_guide.md](react_integration_guide.md) |
 | Human-in-the-loop Phase 1A | Deterministic pre-LLM missing-field prompts can pause with `status="waiting_for_user"`; MCP tools `respond_to_user_input`, `get_pending_user_input`, and `cancel_user_input` resume, recover, or clear process-local pending state. LLM-initiated prompts are still Phase 1B. | [human_in_the_loop_strategy.md](human_in_the_loop_strategy.md), [react_integration_guide.md](react_integration_guide.md) |

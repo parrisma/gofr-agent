@@ -20,6 +20,7 @@ tools from its connected downstream services and returns a grounded answer.
 - [Configuration](#configuration)
 - [Services manifest](#services-manifest)
 - [Results hub](#results-hub)
+- [Health endpoints](#health-endpoints)
 - [MCP tools](#mcp-tools)
 - [CLI](#cli)
 - [Development](#development)
@@ -191,13 +192,31 @@ For downstream service requirements, see
 
 ---
 
+## Health endpoints
+
+The uvicorn app exposes unauthenticated process health routes alongside the MCP
+Streamable HTTP endpoint:
+
+| Route | Use |
+|-------|-----|
+| `GET /ping` | Minimal process reachability: `status`, `service`, `timestamp`, `version` |
+| `GET /health` | Compact orchestrator readiness: status/message plus downstream service counts |
+
+`/health` returns HTTP 200 for `healthy` and `degraded`, and HTTP 503 for
+`unhealthy`. It does not include model names, service URLs, tokens, API keys,
+or detailed config. Use the authenticated MCP `health_check` tool for richer
+diagnostics.
+
+---
+
 ## MCP tools
 
 gofr-agent exposes these tools over MCP:
 
 | Tool | Description |
 |------|-------------|
-| `ping` | Health check — returns status, timestamp, version |
+| `ping` | Authenticated lightweight reachability check returning status, service, timestamp, version |
+| `health_check` | Authenticated sanitized diagnostics for model config, limits, feature flags, downstream services, and results-hub state |
 | `list_services` | List registered downstream services, their health, tools, and safe hub-capability metadata |
 | `ask` | Send a question to the reasoning agent |
 | `reset_session` | Clear conversation history for a session |

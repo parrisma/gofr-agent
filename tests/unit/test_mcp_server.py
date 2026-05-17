@@ -25,7 +25,7 @@ from app.mcp_server.mcp_server import create_mcp_server
 from app.request_context import get_request_id
 from app.services import ServiceConfig
 from app.services.pool import SessionPool
-from app.services.registry import ServiceRegistry
+from app.services.registry import ServiceHubCapabilities, ServiceRegistry
 from app.sessions.backend import PendingAskPayload, PendingUserInput
 from app.sessions.store import SessionStore
 
@@ -89,6 +89,7 @@ def _make_registry(pools: dict | None = None, tools: list | None = None) -> Magi
         else "degraded"
     )
     reg.service_error = MagicMock(return_value=None)
+    reg.service_hub_capabilities = MagicMock(return_value=ServiceHubCapabilities())
     return reg
 
 
@@ -98,6 +99,7 @@ def _make_agent() -> MagicMock:
         return_value=AgentResult(answer="42", steps=[], model="test", tokens_used=10)
     )
     ag.rebuild = MagicMock()
+    ag.is_built = True
     return ag
 
 
@@ -195,6 +197,21 @@ async def _call_tool(mcp, tool_name: str, **kwargs):  # type: ignore[return, no-
 # ---------------------------------------------------------------------------
 
 
+class TestMcpTransportSecurity:
+    def test_mcp_server_uses_configured_bind_host(self) -> None:
+        mcp = create_mcp_server(
+            _make_config(host="0.0.0.0", mcp_port=8090),
+            _make_registry(),
+            _make_agent(),
+            _make_store(),
+            _AllowAll(),
+        )
+
+        assert mcp.settings.host == "0.0.0.0"
+        assert mcp.settings.port == 8090
+        assert mcp.settings.transport_security is None
+
+
 class TestPing:
     async def test_ping_returns_ok(self) -> None:
         mcp = create_mcp_server(
@@ -203,6 +220,7 @@ class TestPing:
         with _auth_context():
             result = await _call_tool(mcp, "ping")
         assert result["status"] == "ok"
+        assert result["service"] == "gofr-agent"
         assert "timestamp" in result
         assert "version" in result
 
@@ -219,6 +237,53 @@ class TestPing:
         )
         with _auth_context(), pytest.raises(McpError):
             await _call_tool(mcp, "ping")
+
+
+class TestHealthCheck:
+    async def test_health_check_authorized(self) -> None:
+        mcp = create_mcp_server(
+            _make_config(llm_model="openai:test"),
+            _make_registry(),
+            _make_agent(),
+            _make_store(),
+            _AllowAll(),
+        )
+
+        with _auth_context():
+            result = await _call_tool(mcp, "health_check")
+
+        assert result["status"] == "healthy"
+        assert result["service"] == "gofr-agent"
+        assert result["config"]["models"]["selected"] == "openai:test"
+        assert result["downstream_services"]["total"] == 0
+
+    async def test_health_check_denied_no_token(self) -> None:
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), _make_store(), _AllowAll()
+        )
+
+        with _auth_context(token=None), pytest.raises(McpError):
+            await _call_tool(mcp, "health_check")
+
+    async def test_health_check_denied_insufficient_activity(self) -> None:
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), _make_store(), _DenyAll()
+        )
+
+        with _auth_context(), pytest.raises(McpError):
+            await _call_tool(mcp, "health_check")
+
+    async def test_health_check_allows_dev_read_token(self) -> None:
+        from tests.helpers.dummy_auth_service import DummyAuthService
+
+        mcp = create_mcp_server(
+            _make_config(), _make_registry(), _make_agent(), _make_store(), DummyAuthService()
+        )
+
+        with _auth_context("dev-read-token"):
+            result = await _call_tool(mcp, "health_check")
+
+        assert result["status"] == "healthy"
 
 
 class TestListServices:

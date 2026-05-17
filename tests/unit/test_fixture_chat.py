@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from scripts.fixture_chat import ask_cli, parse_args
+from scripts.fixture_chat import agent_allowed_hosts, ask_cli, parse_args
 
 
 def _command_from_run_mock(run_mock: object) -> list[str]:
@@ -20,6 +20,22 @@ class TestParseArgs:
 
         assert args.max_steps == 25
         assert args.verbose is True
+
+
+class TestAgentAllowedHosts:
+    def test_default_dev_container_host_is_allowed(self, monkeypatch) -> None:
+        monkeypatch.delenv("GOFR_DEV_CONTAINER", raising=False)
+
+        allowed_hosts = agent_allowed_hosts("gofr-agent")
+
+        assert "gofr-agent-dev:*" in allowed_hosts
+
+    def test_configured_dev_container_host_is_allowed(self, monkeypatch) -> None:
+        monkeypatch.setenv("GOFR_DEV_CONTAINER", "custom-agent-dev")
+
+        allowed_hosts = agent_allowed_hosts("gofr-agent")
+
+        assert "custom-agent-dev:*" in allowed_hosts
 
 
 class TestAskCli:

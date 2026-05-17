@@ -10,6 +10,8 @@ the UI that should be built first, the TypeScript contracts to model, and the
 tests that should prove the interface works.
 
 For repository-wide runtime status, see [current_state.md](current_state.md).
+For a narrower question-by-question health brief, see
+[react_health_integration_answers.md](react_health_integration_answers.md).
 
 ## 1. LLM operating rules
 
@@ -40,12 +42,15 @@ Current facts a UI-building LLM must preserve:
 |------|---------------------------|
 | Transport | MCP Streamable HTTP |
 | Endpoint path | `/mcp` |
+| HTTP health paths | `/ping` and `/health` on the same host/port as `/mcp` |
 | Default Docker/dev URL | `http://gofr-agent:8090/mcp` |
 | MCP port | `8090` |
 | mcpo proxy port | `8091`, not the preferred React path |
 | Reserved future web UI port | `8092`, no web UI is implemented in this repo |
 | Auth | Bearer token in `Authorization` on every MCP request |
+| HTTP health auth | No bearer token required for `GET /ping` or `GET /health` |
 | Dev admin token | `dev-admin-token` |
+| Dev read token | `dev-read-token`, includes `ping`, `health_check`, `list_services`, and `ask` |
 | Session model | Server-side in-memory history keyed by caller-provided `session_id` |
 | Session TTL default | 60 idle minutes |
 | Default max steps | 10 |
@@ -60,6 +65,14 @@ The deployed React app needs an externally reachable MCP origin or a same-origin
 backend proxy. If the React app is served from a different origin, the operator
 must configure CORS on the Starlette/Uvicorn deployment to allow the browser
 origin and the `Authorization` header.
+
+MCP traffic is also subject to FastMCP inbound Host-header protection. If `/mcp`
+returns `421 Invalid Host header`, the backend allowlist does not include the
+host value received on that request. This is not fixed by changing the bearer
+token or by React setting a `Host` header; browser JavaScript cannot set that
+header. The backend/operator must allowlist the public/proxy/Docker host used
+for MCP traffic. Do not confuse this with `GOFR_AGENT_ALLOWED_SERVICE_HOSTS`,
+which controls outbound runtime service registration.
 
 ## 3. React configuration inputs
 
@@ -131,6 +144,20 @@ export function parseTextJson<T>(result: { content?: unknown[] }): T {
 }
 ```
 
+HTTP health routes live next to `/mcp`, not under it. Derive the HTTP base URL
+from the configured MCP URL instead of making users configure the same origin
+twice.
+
+```ts
+export function agentHttpBaseUrl(mcpUrl: string): string {
+  const url = new URL(mcpUrl);
+  url.pathname = url.pathname.replace(/\/mcp\/?$/, "");
+  url.search = "";
+  url.hash = "";
+  return url.toString().replace(/\/$/, "");
+}
+```
+
 ## 5. MCP tools visible to the React UI
 
 All public tools require the bearer token.
@@ -138,6 +165,7 @@ All public tools require the bearer token.
 | Tool | UI use |
 |------|--------|
 | `ping` | Startup health check |
+| `health_check` | Diagnostics/settings panel and degraded-service detail |
 | `list_services` | Capabilities panel and feature availability |
 | `ask` | Main chat request |
 | `respond_to_user_input` | Submit an answer to a Phase 1A pending prompt |
@@ -159,9 +187,94 @@ Downstream services may expose a reserved `_register_results_hub` tool. The
 service registry uses it during discovery. It is filtered out of model-visible
 and UI-facing tool lists.
 
-## 6. Public tool payloads
+## 6. Health surfaces the UI can call
 
-### `ping`
+Use the smallest health surface that answers the UI question. The HTTP routes
+are unauthenticated process/readiness probes. The MCP tools prove tokened MCP
+access and expose diagnostics.
+
+| Surface | Auth | URL or call | UI use |
+|---------|------|-------------|--------|
+| HTTP ping | none | `GET ${agentHttpBaseUrl(mcpUrl)}/ping` | Pre-auth process reachability and deployment smoke check |
+| HTTP health | none | `GET ${agentHttpBaseUrl(mcpUrl)}/health` | Compact readiness banner before MCP connection or when token is unknown |
+| MCP `ping` | bearer token with `GoFRAgentPing` | `client.callTool({ name: "ping", arguments: {} })` | Confirm the configured token can call MCP tools |
+| MCP `health_check` | bearer token with `GoFRAgentHealthCheck` | `client.callTool({ name: "health_check", arguments: {} })` | Diagnostics/settings panel, degraded-service details, selected model, feature flags |
+
+HTTP status behavior for `GET /health`:
+
+- `200` means the server reports `healthy` or `degraded`.
+- `503` means the server reports `unhealthy`.
+- Downstream service failures normally produce `degraded`, not `unhealthy`, so
+  the UI should keep the chat surface available while showing degraded-service
+  warnings.
+
+Recommended startup flow:
+
+1. Call HTTP `GET /ping` to distinguish unreachable server from bad token.
+2. Call HTTP `GET /health` to load compact readiness and downstream counts.
+3. Connect the MCP client with the bearer token.
+4. Call MCP `ping` to verify tokened MCP access.
+5. Call MCP `health_check` for settings/diagnostics, then `list_services` for
+   model-visible tool names and descriptions.
+
+If browser CORS blocks the HTTP probes, treat it as a deployment configuration
+issue. The HTTP routes do not need auth, but the deployment still must allow the
+browser origin to call them.
+
+If HTTP `/ping` succeeds but MCP calls fail with `421 Invalid Host header`, show
+an MCP host-allowlist configuration error. The process is reachable; the backend
+Host-header allowlist for `/mcp` needs the URL or proxy host that the browser is
+using.
+
+## 7. Public health payloads
+
+### HTTP `GET /ping`
+
+Request: no bearer token required.
+
+Response: same shape as MCP `ping`.
+
+```ts
+type PingResponse = {
+  status: "ok";
+  service: "gofr-agent";
+  timestamp: string;
+  version: string;
+};
+```
+
+UI behavior: use this before MCP connection when the user edits the MCP URL or
+opens settings. A successful response says only that the process can answer; it
+does not validate the bearer token.
+
+### HTTP `GET /health`
+
+Request: no bearer token required.
+
+Response:
+
+```ts
+type HttpHealthResponse = {
+  status: "healthy" | "degraded" | "unhealthy";
+  service: "gofr-agent";
+  timestamp: string;
+  version: string;
+  message: string;
+  downstream: {
+    total: number;
+    healthy: number;
+    degraded: number;
+    failed: number;
+  };
+};
+```
+
+UI behavior: use this for a compact connection banner and operations summary.
+It intentionally omits selected model, allowed model overrides, service URLs,
+tool names, tokens, API keys, and raw errors. Show `degraded` as a warning state
+with chat still enabled; show `unhealthy` as a blocking server-readiness state.
+
+### MCP `ping`
 
 Arguments: none.
 
@@ -170,6 +283,7 @@ Response:
 ```ts
 type PingResponse = {
   status: "ok";
+  service: "gofr-agent";
   timestamp: string;
   version: string;
 };
@@ -177,6 +291,74 @@ type PingResponse = {
 
 UI behavior: call on app start and when the user changes URL/token settings.
 Show connected, unauthorized, unavailable, and misconfigured states distinctly.
+This is the right check when the UI needs to know whether the supplied bearer
+token can make MCP tool calls. For token-free reachability, call HTTP
+`GET /ping`.
+
+### MCP `health_check`
+
+Arguments: none.
+
+Response summary:
+
+```ts
+type HealthCheckResponse = {
+  status: "healthy" | "degraded" | "unhealthy";
+  message: string;
+  service: "gofr-agent";
+  timestamp: string;
+  version: string;
+  config: {
+    models: {
+      selected: string;
+      allowed_overrides: string[];
+      openrouter_api_key_configured: boolean;
+    };
+    limits: Record<string, number>;
+    sessions: Record<string, number>;
+    features: Record<string, boolean>;
+    hub: Record<string, boolean | number>;
+  };
+  downstream_services: {
+    total: number;
+    healthy: number;
+    degraded: number;
+    failed: number;
+    items: Array<{
+      name: string;
+      status: "healthy" | "degraded" | "failed";
+      tool_count: number;
+      supports_results_hub: boolean;
+      can_publish_results: boolean;
+      can_consume_results: boolean;
+      result_types: string[];
+      error?: string;
+      registration_error?: string;
+    }>;
+  };
+};
+```
+
+UI behavior: use this for diagnostics/settings surfaces and when a request or
+tool call fails. The payload is sanitized for display: it uses boolean
+`*_configured` flags for secrets and does not return service URLs, bearer
+tokens, callback tokens, API keys, or raw session/tool payloads. For a token-free
+orchestrator probe, call HTTP `GET /health`; that endpoint returns only status,
+message, version, and downstream counts.
+
+Status handling:
+
+- `healthy`: normal connected state.
+- `degraded`: show warnings for downstream services or hub registration errors,
+  but keep chat available.
+- `unhealthy`: show a blocking readiness message; MCP may be reachable, but the
+  agent is not ready for normal operation.
+
+Do not use `health_check` instead of `list_services` for the full capabilities
+panel. `health_check` gives counts and safe service health items; `list_services`
+adds model-visible tool names and descriptions.
+
+## 8. Public tool payloads
 
 ### `list_services`
 
@@ -349,7 +531,7 @@ product explicitly includes service administration.
 `GOFR_AGENT_DYNAMIC_REGISTRATION_ENABLED=true`, and the target host must match
 `GOFR_AGENT_ALLOWED_SERVICE_HOSTS`.
 
-## 7. Reasoning notifications
+## 9. Reasoning notifications
 
 During `ask`, the server emits MCP logging notifications:
 
@@ -456,7 +638,7 @@ Reasoning event UI rules:
 - Tool arguments can contain user data. Put them behind a details disclosure in
   normal views.
 
-## 8. Human-in-the-loop status
+## 10. Human-in-the-loop status
 
 Phase 1A pause/resume is implemented for deterministic missing-field prompts
 that are detected before the LLM run starts. LLM-initiated prompts from inside
@@ -487,7 +669,7 @@ What the UI should do now:
 - Keep the older manual follow-up flow available for deployments where
   interactive resume is disabled.
 
-## 9. Results hub and descriptors
+## 11. Results hub and descriptors
 
 When `GOFR_AGENT_HUB_ENABLED=true`, `gofr-agent` can act as a process-local
 results hub for descriptor handoff between downstream MCP services.
@@ -508,7 +690,7 @@ Known hub limitation: the store is in-memory and process-local. Multi-replica
 deployments need sticky routing or a shared store before descriptors are
 portable across replicas.
 
-## 10. Prompt hardening response models
+## 12. Prompt hardening response models
 
 These response fields are present in the `ask` payload and are enabled or
 populated depending on server flags.
@@ -571,7 +753,7 @@ UI behavior:
 - `provenance`: show in a source/details panel, not inline in the main answer.
 - `as_of`: when present, display freshness near the relevant source/tool.
 
-## 11. Recommended React information architecture
+## 13. Recommended React information architecture
 
 Build a compact workbench with these areas:
 
@@ -598,7 +780,7 @@ Expected controls:
 Do not put explanatory marketing copy in the main viewport. The first screen
 should let the user ask a question immediately.
 
-## 12. State model the React LLM should implement
+## 14. State model the React LLM should implement
 
 Use explicit state rather than deriving everything from text.
 
@@ -606,7 +788,13 @@ Use explicit state rather than deriving everything from text.
 type ConnectionState =
   | { status: "idle" }
   | { status: "checking" }
-  | { status: "connected"; version: string }
+  | {
+      status: "connected";
+      version: string;
+      health?: "healthy" | "degraded" | "unhealthy";
+      message?: string;
+      downstream?: HttpHealthResponse["downstream"];
+    }
   | { status: "unauthorized"; message: string }
   | { status: "unavailable"; message: string };
 
@@ -648,7 +836,7 @@ Reducer guidance:
 - Keep local turns separate from server session history. The server stores
   model-side history by `session_id`; the browser stores display state.
 
-## 13. Reference hook
+## 15. Reference hook
 
 This is a starting point, not a full app.
 
@@ -666,6 +854,7 @@ type UseGofrAgentOptions = {
 export function useGofrAgent(opts: UseGofrAgentOptions) {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [services, setServices] = useState<ServiceStatus[]>([]);
+  const [health, setHealth] = useState<HttpHealthResponse | HealthCheckResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const sessionId = useRef(crypto.randomUUID());
   const clientRef = useRef<Client | null>(null);
@@ -707,6 +896,21 @@ export function useGofrAgent(opts: UseGofrAgentOptions) {
     const client = await ensureClient();
     const result = await client.callTool({ name: "list_services", arguments: {} });
     setServices(parseTextJson<ServiceStatus[]>(result));
+  }, [ensureClient]);
+
+  const checkHttpHealth = useCallback(async () => {
+    const response = await fetch(`${agentHttpBaseUrl(opts.url)}/health`);
+    const data = (await response.json()) as HttpHealthResponse;
+    setHealth(data);
+    return data;
+  }, [opts.url]);
+
+  const refreshDiagnostics = useCallback(async () => {
+    const client = await ensureClient();
+    const result = await client.callTool({ name: "health_check", arguments: {} });
+    const data = parseTextJson<HealthCheckResponse>(result);
+    setHealth(data);
+    return data;
   }, [ensureClient]);
 
   const ask = useCallback(
@@ -801,11 +1005,11 @@ export function useGofrAgent(opts: UseGofrAgentOptions) {
     setTurns([]);
   }, [ensureClient]);
 
-  return { turns, services, busy, ask, reset, refreshServices };
+  return { turns, services, health, busy, ask, reset, refreshServices, checkHttpHealth, refreshDiagnostics };
 }
 ```
 
-## 14. Error handling
+## 16. Error handling
 
 Handle these cases explicitly:
 
@@ -813,7 +1017,10 @@ Handle these cases explicitly:
 |------|--------------|-------------|
 | Missing/invalid token | Bad settings or expired token | Show auth error and settings action |
 | CORS failure | Browser origin not allowed | Show deployment/configuration message |
+| `421 Invalid Host header` on `/mcp` | MCP Host header not allowlisted by backend FastMCP transport security | Show backend host-allowlist configuration message |
 | Network failure | Server unreachable | Show reconnect action |
+| HTTP health degraded | Downstream service or hub registration issue | Show warning but keep chat available |
+| HTTP health unhealthy | Core agent readiness failure | Show blocking readiness state |
 | `max_steps` rejected | Value exceeds hard cap | Clamp and explain |
 | Tool-call limit reached | Run exhausted configured steps | Suggest retry with higher max steps |
 | Verification gap | Could not verify requested fact | Show gap details, not an error toast |
@@ -822,20 +1029,22 @@ Handle these cases explicitly:
 | Pending prompt expired | Prompt TTL elapsed or process restarted | Clear local pending state and let the user retry |
 | `run_failed` event | Runtime/model/tool failure | Mark active turn failed and preserve trace |
 
-## 15. Build checklist for the React-side LLM
+## 17. Build checklist for the React-side LLM
 
 Implement in this order:
 
 1. Create or locate the React/TypeScript app shell.
 2. Add `@modelcontextprotocol/sdk`.
 3. Add a typed `gofrAgentClient` module with `createGofrClient` and
-   `parseTextJson`.
+  `parseTextJson`.
 4. Add TypeScript types for `AskRequest`, `AskResponse`, `HumanInputRequest`,
-   `ReasoningEvent`, `ServiceStatus`, `VerificationGap`,
-   `ClarificationRequest`, and `ProvenanceRecord`.
+  `ReasoningEvent`, `PingResponse`, `HttpHealthResponse`,
+  `HealthCheckResponse`, `ServiceStatus`, `VerificationGap`,
+  `ClarificationRequest`, and `ProvenanceRecord`.
 5. Add a reducer or hook for connection, turns, events, services, and settings.
 6. Build the chat transcript and composer.
-7. Add health check and service list loading.
+7. Add HTTP health probes, MCP `ping`, MCP `health_check`, and service list
+  loading.
 8. Add live reasoning trace rendering from notifications.
 9. Add reset session.
 10. Add advanced constraints only after the basic chat path works.
@@ -854,12 +1063,13 @@ requests admin features:
 - Dynamic service registration in the normal user chat surface.
 - Model override controls for ordinary users.
 
-## 16. Test plan for the React-side LLM
+## 18. Test plan for the React-side LLM
 
 Unit tests:
 
 - `parseTextJson` parses valid MCP text JSON.
 - `parseTextJson` rejects missing text content.
+- `agentHttpBaseUrl` maps `/mcp` URLs to the sibling HTTP route base.
 - Reasoning event reducer appends by pending turn id before `request_id` is
   known.
 - Reasoning event reducer appends by `request_id` after final response.
@@ -871,8 +1081,12 @@ Unit tests:
 Component tests:
 
 - Initial settings render with URL/token/max steps.
-- Successful `ping` moves connection state to connected.
-- Unauthorized `ping` shows an auth state.
+- Successful HTTP `/ping` shows server reachable before token validation.
+- HTTP `/health` with `degraded` shows a warning, not a blocking error.
+- Successful MCP `ping` moves tokened connection state to connected.
+- Unauthorized MCP `ping` shows an auth state.
+- MCP `health_check` renders selected model, feature flags, and degraded
+  service details without exposing tokens or service URLs.
 - `list_services` renders degraded services without crashing.
 - Sending a question appends user and assistant turns.
 - A `tool_call` notification appears in the trace before final answer.
@@ -889,12 +1103,13 @@ Integration tests with a mocked MCP client:
 End-to-end tests when a dev server and gofr-agent are available:
 
 1. Configure MCP URL and token.
-2. Verify health is connected.
-3. Verify services load.
-4. Ask `What tools are available?`.
-5. Confirm an assistant answer appears.
-6. Confirm at least one reasoning event or completed step is visible.
-7. Reset the session and confirm the transcript clears.
+2. Verify HTTP ping and health are reachable.
+3. Verify MCP ping and `health_check` work with the configured token.
+4. Verify services load.
+5. Ask `What tools are available?`.
+6. Confirm an assistant answer appears.
+7. Confirm at least one reasoning event or completed step is visible.
+8. Reset the session and confirm the transcript clears.
 
 If changing this Python backend while building the UI, validate backend changes
 with this repository's wrapper, not raw pytest:
@@ -909,7 +1124,7 @@ For docs-only changes in this repository, at minimum run:
 git diff --check
 ```
 
-## 17. Useful backend references
+## 19. Useful backend references
 
 - MCP server tools: [../app/mcp_server/mcp_server.py](../app/mcp_server/mcp_server.py)
 - Runtime config: [../app/config.py](../app/config.py)

@@ -3,6 +3,7 @@
 Exposes the following tools via FastMCP:
 
 - ``ping`` — health check
+- ``health_check`` — detailed health diagnostics
 - ``list_services`` — enumerate registered downstream services
 - ``ask`` — query the reasoning agent
 - ``reset_session`` — clear conversation history for a session
@@ -24,7 +25,6 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import INVALID_PARAMS, ErrorData
 from pydantic import ValidationError
 
-from app import __version__
 from app.agent.agent import AgentResult, GofrAgent
 from app.agent.events import (
     EventCollector,
@@ -38,6 +38,7 @@ from app.auth import (
     AGENT_ASK,
     AGENT_CANCEL_USER_INPUT,
     AGENT_GET_PENDING_USER_INPUT,
+    AGENT_HEALTH_CHECK,
     AGENT_HUB_FETCH,
     AGENT_HUB_STORE,
     AGENT_LIST_SERVICES,
@@ -59,6 +60,7 @@ from app.exceptions import (
     PendingUserInputExistsError,
     ServiceRegistrationPolicyError,
 )
+from app.health import build_health_payload, build_ping_payload
 from app.hub import ResultStore
 from app.hub.auth import resolve_service_principal
 from app.hub.errors import (
@@ -302,6 +304,8 @@ def create_mcp_server(
     """
     mcp = FastMCP(
         name="gofr-agent",
+        host=config.host,
+        port=config.mcp_port,
         instructions=(
             "Fact-grounded, intent-preserving reasoning agent that orchestrates "
             "downstream MCP services and reports verification gaps when facts "
@@ -355,15 +359,36 @@ def create_mcp_server(
     # ping
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(description="Return a lightweight authenticated reachability payload.")
     async def ping() -> dict[str, str]:
-        """Return a health-check payload."""
         _guard(auth_service, AGENT_PING)
-        return {
-            "status": "ok",
-            "timestamp": datetime.now(UTC).isoformat(),
-            "version": __version__,
-        }
+        return build_ping_payload()
+
+    # ------------------------------------------------------------------
+    # health_check
+    # ------------------------------------------------------------------
+
+    @mcp.tool(
+        name="health_check",
+        description=(
+            "Return sanitized gofr-agent runtime diagnostics. Use this when "
+            "tool calls fail, services seem slow, or a client needs model, "
+            "configuration, service-registry, and results-hub health state."
+        ),
+    )
+    async def health_check() -> dict[str, Any]:
+        _guard(auth_service, AGENT_HEALTH_CHECK)
+        try:
+            return build_health_payload(config, registry, agent)
+        except Exception as exc:
+            logger.error(
+                "MCP health_check payload construction failed",
+                error_class=type(exc).__name__,
+                **request_log_fields(),
+            )
+            raise McpError(
+                ErrorData(code=INVALID_PARAMS, message="Health check unavailable")
+            ) from exc
 
     # ------------------------------------------------------------------
     # _store_result

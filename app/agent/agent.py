@@ -160,6 +160,11 @@ class GofrAgent:
         """Reconstruct the agent (e.g. after a new service is registered)."""
         self.build()
 
+    @property
+    def is_built(self) -> bool:
+        """Return whether the underlying pydantic-ai agent is ready."""
+        return self._agent is not None
+
     # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------

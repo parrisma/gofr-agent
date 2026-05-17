@@ -10,6 +10,7 @@ from app.auth.permissions import (
     AGENT_ASK,
     AGENT_CANCEL_USER_INPUT,
     AGENT_GET_PENDING_USER_INPUT,
+    AGENT_HEALTH_CHECK,
     AGENT_HUB_FETCH,
     AGENT_HUB_STORE,
     AGENT_LIST_SERVICES,
@@ -23,6 +24,7 @@ from app.auth.permissions import (
 
 _ALL = ",".join([
     AGENT_PING,
+    AGENT_HEALTH_CHECK,
     AGENT_LIST_SERVICES,
     AGENT_ASK,
     AGENT_MODEL_OVERRIDE,
@@ -35,7 +37,7 @@ _ALL = ",".join([
     "MCPServer*",
 ])
 
-_READ_ONLY = ",".join([AGENT_PING, AGENT_LIST_SERVICES, AGENT_ASK])
+_READ_ONLY = ",".join([AGENT_PING, AGENT_HEALTH_CHECK, AGENT_LIST_SERVICES, AGENT_ASK])
 _HUB_CALLBACK = ",".join([AGENT_HUB_STORE, AGENT_HUB_FETCH])
 
 _TOKEN_MAP: dict[str, str] = {

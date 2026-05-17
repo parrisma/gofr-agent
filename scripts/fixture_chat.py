@@ -474,6 +474,8 @@ async def build_agent_app(
 ) -> tuple[object, ServiceRegistry]:
     hub_host = public_hub_host(args.host, hosts)
     config = GofrAgentConfig(
+        host=args.host,
+        mcp_port=args.port,
         llm_model=args.model,
         agent_timeout_seconds=args.agent_timeout_seconds,
         hub_enabled=True,
@@ -526,6 +528,8 @@ async def build_descriptor_smoke_app(
 
     hub_host = public_hub_host(args.host)
     config = GofrAgentConfig(
+        host=args.host,
+        mcp_port=args.port,
         llm_model="test",
         agent_timeout_seconds=args.agent_timeout_seconds,
         session_pool_size=4,
@@ -643,6 +647,7 @@ def agent_server_url(bind_host: str, port: int) -> str:
 
 
 def agent_allowed_hosts(bind_host: str, *, hub_host: str | None = None) -> list[str]:
+    dev_container_host = os.environ.get("GOFR_DEV_CONTAINER", "gofr-agent-dev").strip()
     hosts = {
         connect_host(bind_host),
         public_hub_host(bind_host),
@@ -650,6 +655,8 @@ def agent_allowed_hosts(bind_host: str, *, hub_host: str | None = None) -> list[
         "127.0.0.1",
         "localhost",
     }
+    if dev_container_host:
+        hosts.add(dev_container_host)
     if hub_host:
         hosts.add(hub_host)
     return [f"{host}:*" for host in sorted(hosts) if host]

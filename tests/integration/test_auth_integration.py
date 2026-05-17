@@ -13,12 +13,12 @@ import threading
 
 import pytest
 import uvicorn
-from gofr_common.web import AuthHeaderMiddleware
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from app.agent.agent import GofrAgent
 from app.config import GofrAgentConfig
+from app.main_mcp import create_agent_asgi_app
 from app.mcp_server.mcp_server import create_mcp_server
 from app.services import ServiceConfig, ServicesManifest
 from app.services.registry import ServiceRegistry
@@ -27,7 +27,7 @@ from tests.helpers.dummy_auth_service import DummyAuthService
 from tests.integration.mock_mcp_server import _free_port
 
 _ADMIN_TOKEN = "dev-admin-token"
-_READ_TOKEN = "dev-read-token"  # ping/list/ask only — NOT register/refresh/reset
+_READ_TOKEN = "dev-read-token"  # ping/health/list/ask only, not admin tools
 
 
 def _config() -> GofrAgentConfig:
@@ -82,7 +82,7 @@ async def auth_server(mock_mcp_url: str) -> str:  # type: ignore[misc]
     auth_service = DummyAuthService()
 
     mcp = create_mcp_server(config, registry, agent, session_store, auth_service)
-    app = AuthHeaderMiddleware(mcp.streamable_http_app())
+    app = create_agent_asgi_app(mcp, config, registry, agent)
 
     port = _free_port()
     host = "127.0.0.1"
@@ -123,6 +123,19 @@ class TestAuthEnforcement:
             result = await client.call_tool("ping", {})
         data = json.loads(result.content[0].text)  # type: ignore[union-attr]
         assert data["status"] == "ok"
+
+    async def test_health_check_allowed_with_read_token(self, auth_server: str) -> None:
+        """Read token also has GoFRAgentHealthCheck permission."""
+        async with (
+            streamablehttp_client(
+                auth_server, headers={"Authorization": f"Bearer {_READ_TOKEN}"}
+            ) as (r, w, _),
+            ClientSession(r, w) as client,
+        ):
+            await client.initialize()
+            result = await client.call_tool("health_check", {})
+        data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+        assert data["status"] == "healthy"
 
     async def test_ping_denied_without_token(self, auth_server: str) -> None:
         """Missing token must return an INVALID_PARAMS McpError."""

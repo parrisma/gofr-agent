@@ -15,6 +15,7 @@ import asyncio
 import os
 import signal
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from gofr_common.web import AuthHeaderMiddleware
@@ -22,6 +23,7 @@ from gofr_common.web import AuthHeaderMiddleware
 from app.agent.agent import GofrAgent
 from app.auth import get_auth_service
 from app.config import GofrAgentConfig
+from app.health import create_health_routes
 from app.logger import get_logger
 from app.mcp_server.mcp_server import create_mcp_server
 from app.services import ServicesManifest
@@ -29,6 +31,18 @@ from app.services.registry import ServiceRegistry
 from app.sessions.store import SessionStore
 
 logger = get_logger("gofr-agent.main")
+
+
+def create_agent_asgi_app(
+    mcp: Any,
+    config: GofrAgentConfig,
+    registry: ServiceRegistry,
+    agent: GofrAgent,
+) -> AuthHeaderMiddleware:
+    """Build the production ASGI app with public health routes."""
+    app = mcp.streamable_http_app()
+    app.routes.extend(create_health_routes(config, registry, agent))
+    return AuthHeaderMiddleware(app)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -74,6 +88,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 async def _run_server(args: argparse.Namespace) -> None:
     config = GofrAgentConfig(
+        host=args.host,
+        mcp_port=args.port,
         session_pool_size=args.pool_size,
         llm_model=args.llm_model,
     )
@@ -127,7 +143,7 @@ async def _run_server(args: argparse.Namespace) -> None:
     logger.info("Starting gofr-agent MCP server", host=args.host, port=args.port)
 
     server_config = uvicorn.Config(
-        AuthHeaderMiddleware(mcp.streamable_http_app()),
+        create_agent_asgi_app(mcp, config, registry, agent),
         host=args.host,
         port=args.port,
         log_level=args.log_level.lower(),

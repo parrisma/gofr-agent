@@ -173,6 +173,12 @@ Tool discovery runs at startup for all services in the manifest. It also runs on
 
 ## 5. MCP Tools Exposed
 
+The same ASGI app also exposes unauthenticated HTTP `GET /ping` and
+`GET /health` routes for orchestrators. `/ping` returns only process metadata;
+`/health` returns status/message and downstream counts. Detailed model,
+configuration, service, and results-hub diagnostics are available only through
+the authenticated MCP `health_check` tool.
+
 ### 5.1 `ask`
 
 The primary interface.
@@ -273,9 +279,37 @@ never included.
 
 ### 5.5 `ping`
 
-Standard health check returning timestamp and version (consistent with other gofr services).
+Authenticated lightweight MCP reachability check returning status, service,
+timestamp, and version.
 
-### 5.6 `refresh_services` *(admin)*
+**Output:**
+
+```json
+{
+  "status": "ok",
+  "service": "gofr-agent",
+  "timestamp": "2026-05-17T12:00:00+00:00",
+  "version": "0.1.0"
+}
+```
+
+### 5.6 `health_check`
+
+Authenticated diagnostics for runtime readiness. The payload includes selected
+model, allowed model overrides, bounded runtime limits, session settings,
+feature flags, results-hub configuration booleans/limits, and downstream service
+counts/items. It never returns bearer tokens, OpenRouter keys, Vault/JWT
+secrets, callback tokens, service URLs, session contents, tool payloads, or full
+tracebacks.
+
+Overall status is:
+
+- `healthy` when the agent is built and all registered services are healthy.
+- `degraded` when downstream services are degraded/failed or hub registration
+  errors exist while the agent can still respond.
+- `unhealthy` when the core agent is not ready.
+
+### 5.7 `refresh_services` *(admin)*
 
 Re-runs tool discovery against all registered services and rebuilds the agent tool set. Requires auth token if auth is enabled.
 
