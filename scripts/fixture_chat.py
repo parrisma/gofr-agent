@@ -35,7 +35,6 @@ for import_path in (PROJECT_ROOT, COMMON_SRC):
 
 import uvicorn
 from gofr_common.web import AuthHeaderMiddleware
-from mcp.server.transport_security import TransportSecuritySettings
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -55,6 +54,7 @@ from app.mcp_server.mcp_server import create_mcp_server
 from app.services import ServiceConfig, ServicesManifest
 from app.services.registry import ServiceRegistry
 from app.sessions.store import SessionStore
+from app.transport_security import apply_transport_security
 from tests.fixtures.mcp_services import analytics, instruments
 from tests.fixtures.mcp_services._server import _UvicornThread, make_service_server
 
@@ -293,10 +293,7 @@ def choose_service_hosts(mode: str) -> dict[str, str]:
 
 
 def service_urls_from_hosts(hosts: dict[str, str]) -> dict[str, str]:
-    return {
-        name: f"http://{hosts[name]}:{port}/mcp"
-        for name, port in SERVICE_PORTS.items()
-    }
+    return {name: f"http://{hosts[name]}:{port}/mcp" for name, port in SERVICE_PORTS.items()}
 
 
 def fixture_manifest(hosts: dict[str, str]) -> ServicesManifest:
@@ -372,11 +369,7 @@ def _descriptor_smoke_model(
             ]
         )
 
-    if (
-        simple_return_payload is None
-        or volatility_payload is None
-        or drawdown_payload is None
-    ):
+    if simple_return_payload is None or volatility_payload is None or drawdown_payload is None:
         descriptor = json.loads(str(instrument_payload["content"]))
         return ModelResponse(
             parts=[
@@ -483,6 +476,7 @@ async def build_agent_app(
         hub_default_ttl_seconds=args.hub_ttl_seconds,
         hub_max_payload_bytes=65536,
         hub_max_results=32,
+        mcp_allowed_hosts=agent_allowed_hosts(args.host, hub_host=hub_host),
     )
     registry = ServiceRegistry(config)
     await registry.load_manifest(fixture_manifest(hosts))
@@ -497,11 +491,7 @@ async def build_agent_app(
     agent.build()
     store = SessionStore(ttl_minutes=config.session_ttl_minutes)
     mcp = create_mcp_server(config, registry, agent, store, auth_service)
-    mcp.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=agent_allowed_hosts(args.host, hub_host=hub_host),
-        allowed_origins=[],
-    )
+    apply_transport_security(mcp, config)
     return AuthHeaderMiddleware(mcp.streamable_http_app()), registry
 
 
@@ -522,9 +512,7 @@ async def build_descriptor_smoke_app(
     instruments_host, instruments_port, instruments_thread = make_service_server(
         instruments_module.mcp
     )
-    analytics_host, analytics_port, analytics_thread = make_service_server(
-        analytics_module.mcp
-    )
+    analytics_host, analytics_port, analytics_thread = make_service_server(analytics_module.mcp)
 
     hub_host = public_hub_host(args.host)
     config = GofrAgentConfig(
@@ -538,6 +526,7 @@ async def build_descriptor_smoke_app(
         hub_default_ttl_seconds=args.hub_ttl_seconds,
         hub_max_payload_bytes=65536,
         hub_max_results=32,
+        mcp_allowed_hosts=agent_allowed_hosts(args.host, hub_host=hub_host),
     )
     registry = ServiceRegistry(config)
     await registry.load_manifest(
@@ -569,11 +558,7 @@ async def build_descriptor_smoke_app(
     agent.build()
     store = SessionStore(ttl_minutes=config.session_ttl_minutes)
     mcp = create_mcp_server(config, registry, agent, store, auth_service)
-    mcp.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=agent_allowed_hosts(args.host, hub_host=hub_host),
-        allowed_origins=[],
-    )
+    apply_transport_security(mcp, config)
     resources = LocalFixtureResources(
         service_urls={
             "instruments": f"http://{instruments_host}:{instruments_port}/mcp",

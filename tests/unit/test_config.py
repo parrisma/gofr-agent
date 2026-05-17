@@ -49,6 +49,10 @@ class TestGofrAgentConfig:
         assert cfg.mcpo_port == 8091
         assert cfg.host == "0.0.0.0"
         assert cfg.llm_model == "openai:gpt-4o-mini"
+        assert cfg.mcp_allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        assert cfg.mcp_allowed_origins == []
+        assert cfg.mcp_dns_rebinding_protection_enabled is True
+        assert cfg.cors_allowed_origins == []
         assert cfg.agent_timeout_seconds == 120
         assert cfg.max_steps == 10
         assert cfg.max_steps_hard_cap == 50
@@ -87,6 +91,18 @@ class TestGofrAgentConfig:
         env = {
             "GOFR_AGENT_MCP_PORT": "9090",
             "GOFR_AGENT_LLM_MODEL": "anthropic:claude-3-haiku",
+            "GOFR_AGENT_MCP_ALLOWED_HOSTS": ",".join(
+                [
+                    "gofr-agent-dev",
+                    "gofr-agent-dev:8090",
+                    "127.0.0.1:*",
+                    "localhost:*",
+                    "[::1]:*",
+                ]
+            ),
+            "GOFR_AGENT_MCP_ALLOWED_ORIGINS": "http://localhost:3000,https://console.example.internal",
+            "GOFR_AGENT_MCP_DNS_REBINDING_PROTECTION_ENABLED": "false",
+            "GOFR_AGENT_CORS_ORIGINS": "http://localhost:3000,https://console.example.internal",
             "GOFR_AGENT_AGENT_TIMEOUT_SECONDS": "45",
             "GOFR_AGENT_MAX_STEPS": "5",
             "GOFR_AGENT_MAX_STEPS_HARD_CAP": "25",
@@ -124,6 +140,22 @@ class TestGofrAgentConfig:
         cfg = GofrAgentConfig.from_env(env=env)
         assert cfg.mcp_port == 9090
         assert cfg.llm_model == "anthropic:claude-3-haiku"
+        assert cfg.mcp_allowed_hosts == [
+            "gofr-agent-dev",
+            "gofr-agent-dev:8090",
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+        ]
+        assert cfg.mcp_allowed_origins == [
+            "http://localhost:3000",
+            "https://console.example.internal",
+        ]
+        assert cfg.mcp_dns_rebinding_protection_enabled is False
+        assert cfg.cors_allowed_origins == [
+            "http://localhost:3000",
+            "https://console.example.internal",
+        ]
         assert cfg.agent_timeout_seconds == 45
         assert cfg.max_steps == 5
         assert cfg.max_steps_hard_cap == 25
@@ -202,3 +234,39 @@ class TestGofrAgentConfig:
         )
 
         assert cfg.hub_url == "https://agent.example.internal/mcp"
+
+    @pytest.mark.parametrize(
+        "host_pattern",
+        [
+            "*",
+            "gofr-*",
+            "http://gofr-agent:8090",
+            "gofr-agent/mcp",
+        ],
+    )
+    def test_mcp_allowed_hosts_rejects_unsafe_patterns(self, host_pattern: str) -> None:
+        with pytest.raises(ValidationError, match="mcp_allowed_hosts"):
+            GofrAgentConfig(mcp_allowed_hosts=[host_pattern])
+
+    @pytest.mark.parametrize(
+        "origin",
+        [
+            "*",
+            "localhost:3000",
+            "ftp://console.example.internal",
+            "http://console.example.internal/mcp",
+            "http://user:pass@console.example.internal",  # pragma: allowlist secret
+        ],
+    )
+    def test_origin_allow_lists_reject_invalid_origins(self, origin: str) -> None:
+        with pytest.raises(ValidationError):
+            GofrAgentConfig(mcp_allowed_origins=[origin])
+
+    def test_origin_allow_lists_normalise_trailing_slash(self) -> None:
+        cfg = GofrAgentConfig(
+            mcp_allowed_origins=["http://localhost:3000/"],
+            cors_allowed_origins=["https://console.example.internal/"],
+        )
+
+        assert cfg.mcp_allowed_origins == ["http://localhost:3000"]
+        assert cfg.cors_allowed_origins == ["https://console.example.internal"]

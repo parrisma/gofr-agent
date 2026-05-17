@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from gofr_common.web import AuthHeaderMiddleware
+from gofr_common.web import AuthHeaderMiddleware, create_cors_middleware
 
 from app.agent.agent import GofrAgent
 from app.auth import get_auth_service
@@ -29,6 +29,7 @@ from app.mcp_server.mcp_server import create_mcp_server
 from app.services import ServicesManifest
 from app.services.registry import ServiceRegistry
 from app.sessions.store import SessionStore
+from app.transport_security import apply_transport_security, build_mcp_cors_config
 
 logger = get_logger("gofr-agent.main")
 
@@ -38,11 +39,16 @@ def create_agent_asgi_app(
     config: GofrAgentConfig,
     registry: ServiceRegistry,
     agent: GofrAgent,
-) -> AuthHeaderMiddleware:
+) -> Any:
     """Build the production ASGI app with public health routes."""
+    apply_transport_security(mcp, config)
     app = mcp.streamable_http_app()
     app.routes.extend(create_health_routes(config, registry, agent))
-    return AuthHeaderMiddleware(app)
+    wrapped_app = AuthHeaderMiddleware(app)
+    cors_config = build_mcp_cors_config(config)
+    if cors_config is None:
+        return wrapped_app
+    return create_cors_middleware(wrapped_app, cors_config)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -75,7 +81,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--pool-size",
         type=int,
-        default=int(os.environ.get("GOFR_AGENT_POOL_SIZE", "3")),
+        default=int(
+            os.environ.get(
+                "GOFR_AGENT_POOL_SIZE",
+                os.environ.get("GOFR_AGENT_SESSION_POOL_SIZE", "3"),
+            )
+        ),
         help="Number of concurrent connections per service.",
     )
     parser.add_argument(
@@ -87,11 +98,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _run_server(args: argparse.Namespace) -> None:
-    config = GofrAgentConfig(
-        host=args.host,
-        mcp_port=args.port,
-        session_pool_size=args.pool_size,
-        llm_model=args.llm_model,
+    config = GofrAgentConfig.from_env().model_copy(
+        update={
+            "host": args.host,
+            "mcp_port": args.port,
+            "session_pool_size": args.pool_size,
+            "llm_model": args.llm_model,
+        },
     )
 
     # Load services manifest

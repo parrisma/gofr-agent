@@ -11,25 +11,23 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from app.agent.agent import GofrAgent
-from app.auth import ALL_ACTIVITIES
 from app.config import GofrAgentConfig
 from app.main_mcp import create_agent_asgi_app
 from app.mcp_server.mcp_server import create_mcp_server
 from app.services import ServiceConfig, ServicesManifest
 from app.services.registry import ServiceHubCapabilities, ServiceRegistry
 from app.sessions.store import SessionStore
+from tests.helpers.dummy_auth_service import DummyAuthService
 from tests.integration.mock_mcp_server import _free_port
 
 
-class _AllowAll:
-    """Auth service that grants every activity to every token."""
-
-    def authorised_activities(self, token: str) -> str:  # noqa: ARG002
-        return ",".join(ALL_ACTIVITIES + ["MCPServer*"])
-
-
 def _config() -> GofrAgentConfig:
-    return GofrAgentConfig(llm_model="test")
+    return GofrAgentConfig(
+        llm_model="test",
+        mcp_allowed_hosts=["127.0.0.1:*", "gofr-agent-dev:8090"],
+        mcp_allowed_origins=["http://localhost:3000"],
+        cors_allowed_origins=["http://localhost:3000"],
+    )
 
 
 def _manifest(url: str) -> ServicesManifest:
@@ -74,11 +72,12 @@ async def agent_server(mock_mcp_url: str) -> str:
     config = _config()
     registry = ServiceRegistry(config)
     await registry.load_manifest(_manifest(mock_mcp_url))
-    agent = GofrAgent(config, registry, _AllowAll())
+    auth_service = DummyAuthService()
+    agent = GofrAgent(config, registry, auth_service)
     agent.build()
     session_store = SessionStore(ttl_minutes=60)
 
-    mcp = create_mcp_server(config, registry, agent, session_store, _AllowAll())
+    mcp = create_mcp_server(config, registry, agent, session_store, auth_service)
     app = create_agent_asgi_app(mcp, config, registry, agent)
 
     port = _free_port()
@@ -109,11 +108,12 @@ async def agent_server_with_hub_capabilities(mock_mcp_url: str) -> str:
             result_types=("ohlcv_bars",),
         ),
     )
-    agent = GofrAgent(config, registry, _AllowAll())
+    auth_service = DummyAuthService()
+    agent = GofrAgent(config, registry, auth_service)
     agent.build()
     session_store = SessionStore(ttl_minutes=60)
 
-    mcp = create_mcp_server(config, registry, agent, session_store, _AllowAll())
+    mcp = create_mcp_server(config, registry, agent, session_store, auth_service)
     app = create_agent_asgi_app(mcp, config, registry, agent)
 
     port = _free_port()
@@ -129,7 +129,30 @@ async def agent_server_with_hub_capabilities(mock_mcp_url: str) -> str:
     await registry.shutdown()
 
 
-_HEADERS = {"Authorization": "Bearer allow-all"}
+_HEADERS = {"Authorization": "Bearer dev-admin-token"}
+
+
+def _initialize_payload() -> dict[str, object]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "gofr-console-smoke", "version": "0.0.1"},
+        },
+    }
+
+
+def _console_initialize_headers() -> dict[str, str]:
+    return {
+        "Host": "gofr-agent-dev:8090",
+        "Origin": "http://localhost:3000",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Authorization": "Bearer dev-admin-token",
+    }
 
 
 class TestMCPServerIntegration:
@@ -198,9 +221,7 @@ class TestMCPServerIntegration:
         raw = result.content[0].text  # type: ignore[union-attr]
         data = json.loads(raw)
         services = (
-            data
-            if isinstance(data, list)
-            else data.get("services", data.get("result", [data]))
+            data if isinstance(data, list) else data.get("services", data.get("result", [data]))
         )
         service = next(item for item in services if item.get("name") == "mock")
 
@@ -253,6 +274,7 @@ class TestMCPServerIntegration:
             response = await client.get(agent_server.removesuffix("/mcp") + "/ping")
 
         assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
         data = response.json()
         assert data["status"] == "ok"
         assert data["service"] == "gofr-agent"
@@ -262,6 +284,7 @@ class TestMCPServerIntegration:
             response = await client.get(agent_server.removesuffix("/mcp") + "/health")
 
         assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
         data = response.json()
         assert data["status"] == "healthy"
         assert data["service"] == "gofr-agent"
@@ -273,6 +296,88 @@ class TestMCPServerIntegration:
         }
         assert "config" not in data
         assert "items" not in data["downstream"]
+
+    async def test_console_shaped_initialize_is_allowed(self, agent_server: str) -> None:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                agent_server,
+                headers=_console_initialize_headers(),
+                json=_initialize_payload(),
+            )
+
+        assert response.status_code == 200
+        assert response.headers["mcp-session-id"]
+        assert "event:" in response.text or "jsonrpc" in response.text
+
+    async def test_disallowed_origin_is_rejected(self, agent_server: str) -> None:
+        headers = _console_initialize_headers()
+        headers["Origin"] = "http://evil.example"
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(agent_server, headers=headers, json=_initialize_payload())
+
+        assert response.status_code == 403
+        assert response.text == "Invalid Origin header"
+
+    async def test_disallowed_host_is_rejected(self, agent_server: str) -> None:
+        headers = _console_initialize_headers()
+        headers["Host"] = "evil.example"
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(agent_server, headers=headers, json=_initialize_payload())
+
+        assert response.status_code == 421
+        assert response.text == "Invalid Host header"
+
+    async def test_cors_preflight_allows_configured_console_origin(
+        self,
+        agent_server: str,
+    ) -> None:
+        async with httpx.AsyncClient() as client:
+            response = await client.options(
+                agent_server,
+                headers={
+                    "Origin": "http://localhost:3000",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": ", ".join(
+                        ["Authorization", "Content-Type", "Accept", "Mcp-Session-Id"]
+                    ),
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+        assert "Mcp-Session-Id" in response.headers["access-control-allow-headers"]
+
+    async def test_cors_preflight_rejects_unconfigured_origin(self, agent_server: str) -> None:
+        async with httpx.AsyncClient() as client:
+            response = await client.options(
+                agent_server,
+                headers={
+                    "Origin": "http://evil.example",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "Authorization",
+                },
+            )
+
+        assert response.status_code == 400
+        assert "access-control-allow-origin" not in response.headers
+
+    async def test_mcp_tool_execution_fails_closed_with_invalid_token(
+        self,
+        agent_server: str,
+    ) -> None:
+        async with (
+            streamablehttp_client(
+                agent_server,
+                headers={"Authorization": "Bearer invalid-token"},
+            ) as (read, write, _),
+            ClientSession(read, write) as client,
+        ):
+            await client.initialize()
+            result = await client.call_tool("ping", {})
+
+        assert result.isError
 
     async def test_reset_session_tool(self, agent_server: str) -> None:
         async with (

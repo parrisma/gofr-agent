@@ -14,7 +14,9 @@ import importlib
 
 import uvicorn
 from gofr_common.web import AuthHeaderMiddleware
-from mcp.server.transport_security import TransportSecuritySettings
+
+from app.config import GofrAgentConfig
+from app.transport_security import apply_transport_security
 
 SERVICES: dict[str, str] = {
     "instruments": "tests.fixtures.mcp_services.instruments",
@@ -56,11 +58,7 @@ def main() -> None:
     args = parser.parse_args()
 
     mod = importlib.import_module(SERVICES[args.service])
-    mod.mcp.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=DOCKER_ALLOWED_HOSTS,
-        allowed_origins=[],
-    )
+    apply_transport_security(mod.mcp, GofrAgentConfig(mcp_allowed_hosts=DOCKER_ALLOWED_HOSTS))
     app = AuthHeaderMiddleware(mod.mcp.streamable_http_app())
 
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)

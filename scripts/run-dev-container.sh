@@ -27,6 +27,11 @@ WEB_PORT="${GOFRAGT_WEB_PORT:-9042}"
 # Primary network for dev; also connects to gofr-test-net for tests
 DOCKER_NETWORK="${GOFRAGT_DOCKER_NETWORK:-gofr-net}"
 TEST_NETWORK="${GOFR_TEST_NETWORK:-gofr-test-net}"
+DEFAULT_MCP_ALLOWED_HOSTS="gofr-agent-dev,gofr-agent-dev:8040,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,127.0.0.1:*,localhost:*,[::1]:*"
+DEFAULT_CONSOLE_ORIGINS="http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000"
+MCP_ALLOWED_HOSTS="${GOFR_AGENT_MCP_ALLOWED_HOSTS:-$DEFAULT_MCP_ALLOWED_HOSTS}"
+MCP_ALLOWED_ORIGINS="${GOFR_AGENT_MCP_ALLOWED_ORIGINS:-$DEFAULT_CONSOLE_ORIGINS}"
+CORS_ORIGINS="${GOFR_AGENT_CORS_ORIGINS:-$DEFAULT_CONSOLE_ORIGINS}"
 
 # Fixed container-internal paths (must match image layout; do NOT derive from host home).
 CONTAINER_HOME="/home/gofr"
@@ -80,6 +85,9 @@ echo "Host user: $(id -un) (UID=${GOFR_UID}, GID=${GOFR_GID})"
 echo "Container will run with --user ${GOFR_UID}:${GOFR_GID}"
 echo "Ports: MCP=$MCP_PORT, MCPO=$MCPO_PORT, Web=$WEB_PORT"
 echo "Networks: $DOCKER_NETWORK, $TEST_NETWORK"
+echo "MCP allowed hosts: $MCP_ALLOWED_HOSTS"
+echo "MCP allowed origins: $MCP_ALLOWED_ORIGINS"
+echo "CORS origins: $CORS_ORIGINS"
 echo "======================================================================="
 
 # Create docker networks if they don't exist
@@ -189,6 +197,9 @@ CONTAINER_ID=$(docker run -d \
     -e GOFR_AGENT_VAULT_URL=http://gofr-vault:8201 \
     -e GOFR_AGENT_VAULT_PATH_PREFIX=gofr/auth \
     -e GOFR_AGENT_VAULT_MOUNT=secret \
+    -e GOFR_AGENT_MCP_ALLOWED_HOSTS="${MCP_ALLOWED_HOSTS}" \
+    -e GOFR_AGENT_MCP_ALLOWED_ORIGINS="${MCP_ALLOWED_ORIGINS}" \
+    -e GOFR_AGENT_CORS_ORIGINS="${CORS_ORIGINS}" \
     "$IMAGE_NAME" 2>&1) || {
     echo ""
     echo "ERROR: docker run failed."

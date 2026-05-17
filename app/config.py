@@ -11,7 +11,9 @@ from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+DEFAULT_MCP_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 
 
 class GofrAgentConfig(BaseModel):
@@ -33,6 +35,12 @@ class GofrAgentConfig(BaseModel):
 
     # Service discovery
     services_file: Path | None = None
+
+    # Inbound MCP transport security
+    mcp_allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_MCP_ALLOWED_HOSTS))
+    mcp_allowed_origins: list[str] = Field(default_factory=list)
+    mcp_dns_rebinding_protection_enabled: bool = True
+    cors_allowed_origins: list[str] = Field(default_factory=list)
 
     # Agent behaviour
     agent_timeout_seconds: int = 120
@@ -73,6 +81,16 @@ class GofrAgentConfig(BaseModel):
     # Logging
     log_level: str = "INFO"
 
+    @field_validator("mcp_allowed_hosts")
+    @classmethod
+    def _validate_mcp_allowed_hosts(cls, hosts: list[str]) -> list[str]:
+        return [_validate_mcp_host_pattern(host) for host in hosts]
+
+    @field_validator("mcp_allowed_origins", "cors_allowed_origins")
+    @classmethod
+    def _validate_http_origins(cls, origins: list[str]) -> list[str]:
+        return [_validate_http_origin(origin) for origin in origins]
+
     @model_validator(mode="after")
     def _validate_hub_settings(self) -> GofrAgentConfig:
         if not self.hub_enabled:
@@ -93,9 +111,7 @@ class GofrAgentConfig(BaseModel):
 
         try:
             if ip_address(hostname).is_loopback:
-                raise ValueError(
-                    "hub_url must not use a loopback host when hub is enabled"
-                )
+                raise ValueError("hub_url must not use a loopback host when hub is enabled")
         except ValueError as exc:
             if "loopback" in str(exc):
                 raise
@@ -135,6 +151,13 @@ class GofrAgentConfig(BaseModel):
             llm_model=_get("LLM_MODEL", "openai:gpt-4o-mini"),
             openrouter_api_key=_get("OPENROUTER_API_KEY") or None,
             services_file=Path(services_file) if services_file else None,
+            mcp_allowed_hosts=_get_list("MCP_ALLOWED_HOSTS") or list(DEFAULT_MCP_ALLOWED_HOSTS),
+            mcp_allowed_origins=_get_list("MCP_ALLOWED_ORIGINS"),
+            mcp_dns_rebinding_protection_enabled=_get_bool(
+                "MCP_DNS_REBINDING_PROTECTION_ENABLED",
+                True,
+            ),
+            cors_allowed_origins=_get_list("CORS_ORIGINS"),
             agent_timeout_seconds=int(_get("AGENT_TIMEOUT_SECONDS", "120")),
             max_steps=int(_get("MAX_STEPS", "10")),
             max_steps_hard_cap=int(_get("MAX_STEPS_HARD_CAP", "50")),
@@ -145,9 +168,7 @@ class GofrAgentConfig(BaseModel):
             max_sessions=int(_get("MAX_SESSIONS", "1000")),
             max_messages_per_session=int(_get("MAX_MESSAGES_PER_SESSION", "100")),
             session_ttl_minutes=int(_get("SESSION_TTL_MINUTES", "60")),
-            session_sweep_interval_seconds=int(
-                _get("SESSION_SWEEP_INTERVAL_SECONDS", "60")
-            ),
+            session_sweep_interval_seconds=int(_get("SESSION_SWEEP_INTERVAL_SECONDS", "60")),
             tool_result_max_chars=int(_get("TOOL_RESULT_MAX_CHARS", "4000")),
             tool_retry_attempts=int(_get("TOOL_RETRY_ATTEMPTS", "2")),
             session_pool_size=int(_get("SESSION_POOL_SIZE", "3")),
@@ -184,3 +205,43 @@ class GofrAgentConfig(BaseModel):
             log_level=_get("LOG_LEVEL", "INFO"),
         )
 
+
+def _clean_list_value(value: str, field_name: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{field_name} must not contain empty values")
+    if cleaned != value or any(char.isspace() for char in cleaned):
+        raise ValueError(f"{field_name} must not contain whitespace")
+    if any(not char.isprintable() for char in cleaned):
+        raise ValueError(f"{field_name} must contain printable values")
+    return cleaned
+
+
+def _validate_mcp_host_pattern(value: str) -> str:
+    host = _clean_list_value(value, "mcp_allowed_hosts")
+    if host == "*":
+        raise ValueError("mcp_allowed_hosts must not contain bare wildcard '*'")
+    if "://" in host or any(char in host for char in "/?#"):
+        raise ValueError("mcp_allowed_hosts entries must be Host header values, not URLs")
+    if "*" in host and not host.endswith(":*"):
+        raise ValueError("mcp_allowed_hosts only supports wildcard port patterns")
+    if host.endswith(":*") and host[:-2] == "":
+        raise ValueError("mcp_allowed_hosts wildcard port pattern requires a host")
+    return host
+
+
+def _validate_http_origin(value: str) -> str:
+    origin = _clean_list_value(value, "allowed origins")
+    if origin == "*":
+        raise ValueError("origin allow-lists must not contain bare wildcard '*'")
+
+    parsed = urlsplit(origin)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("origin allow-list entries must use http or https")
+    if not parsed.hostname:
+        raise ValueError("origin allow-list entries must include a hostname")
+    if parsed.username or parsed.password:
+        raise ValueError("origin allow-list entries must not include credentials")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError("origin allow-list entries must not include paths or query strings")
+    return origin.rstrip("/")

@@ -18,6 +18,7 @@ from app.services.registry import ServiceRegistry
 
 SERVICE_NAME = "gofr-agent"
 _ERROR_MAX_CHARS = 512
+_NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 
 logger = get_logger("gofr-agent.health")
 
@@ -228,7 +229,7 @@ def create_health_routes(
     """Create unauthenticated Starlette routes for `/ping` and `/health`."""
 
     async def ping(_request: object) -> JSONResponse:
-        return JSONResponse(build_ping_payload())
+        return JSONResponse(build_ping_payload(), headers=_NO_STORE_HEADERS)
 
     async def health(_request: object) -> JSONResponse:
         try:
@@ -241,7 +242,7 @@ def create_health_routes(
             )
             payload = _unhealthy_http_payload()
         status_code = 503 if payload["status"] == "unhealthy" else 200
-        return JSONResponse(payload, status_code=status_code)
+        return JSONResponse(payload, status_code=status_code, headers=_NO_STORE_HEADERS)
 
     return [
         Route("/ping", endpoint=ping, methods=["GET"]),

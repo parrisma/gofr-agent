@@ -66,13 +66,40 @@ backend proxy. If the React app is served from a different origin, the operator
 must configure CORS on the Starlette/Uvicorn deployment to allow the browser
 origin and the `Authorization` header.
 
-MCP traffic is also subject to FastMCP inbound Host-header protection. If `/mcp`
-returns `421 Invalid Host header`, the backend allowlist does not include the
-host value received on that request. This is not fixed by changing the bearer
-token or by React setting a `Host` header; browser JavaScript cannot set that
-header. The backend/operator must allowlist the public/proxy/Docker host used
-for MCP traffic. Do not confuse this with `GOFR_AGENT_ALLOWED_SERVICE_HOSTS`,
-which controls outbound runtime service registration.
+MCP traffic is also subject to FastMCP inbound Host and Origin protection. The
+backend reads these settings from:
+
+- `GOFR_AGENT_MCP_ALLOWED_HOSTS`
+- `GOFR_AGENT_MCP_ALLOWED_ORIGINS`
+- `GOFR_AGENT_MCP_DNS_REBINDING_PROTECTION_ENABLED`
+- `GOFR_AGENT_CORS_ORIGINS`
+
+If `/mcp` returns `421 Invalid Host header`, the backend allowlist does not
+include the Host value received on that request. If it returns
+`403 Invalid Origin header`, the backend allowlist does not include the browser
+Origin. These are not fixed by changing the bearer token or by React setting a
+`Host` header; browser JavaScript cannot set that header. The backend/operator
+must allowlist the public/proxy/Docker Host and Origin values used for MCP
+traffic. Do not confuse this with `GOFR_AGENT_ALLOWED_SERVICE_HOSTS`, which
+controls outbound runtime service registration.
+
+For the local console topology, the backend should explicitly allow the console
+browser origins and the Host value the agent actually receives through the proxy:
+
+```text
+GOFR_AGENT_MCP_ALLOWED_HOSTS=gofr-agent-dev,gofr-agent-dev:8090,gofr-agent:8090,127.0.0.1:*,localhost:*,[::1]:*
+GOFR_AGENT_MCP_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000
+GOFR_AGENT_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000
+```
+
+After a backend version with this contract is deployed, the console proxy can
+remove its Origin-stripping workaround. The browser should continue to call the
+same-origin console proxy; MCP chat and tool calls remain bearer-authenticated.
+Unauthenticated `GET /ping` and `GET /health` stay compact and safe. Detailed
+runtime diagnostics, including model, limits, feature flags, and downstream
+service details, are available through authenticated MCP `health_check`.
+Downstream degraded state remains HTTP 200 with JSON `status: degraded`, and
+invalid bearer tokens still fail closed during MCP tool execution.
 
 ## 3. React configuration inputs
 

@@ -17,6 +17,7 @@ tools from its connected downstream services and returns a grounded answer.
 - [Architecture](#architecture)
 - [Current state](#current-state)
 - [Quick start](#quick-start)
+- [Local UI workflow](#local-ui-workflow)
 - [Configuration](#configuration)
 - [Services manifest](#services-manifest)
 - [Results hub](#results-hub)
@@ -93,6 +94,43 @@ The server listens on **port 8090** by default.
 
 ---
 
+## Local UI workflow
+
+For local UI testing against the real `app.main_mcp` server plus the Docker
+fixture MCP services, use the helper scripts instead of starting pieces by
+hand:
+
+```bash
+# 1. Start the fixture MCP services and write tmp/fixture-services.yml
+./scripts/start-test-mcp-services.sh
+
+# 2. Start the real MCP server with the generated manifest
+./scripts/start-real-server.sh \
+  --model openai:deepseek/deepseek-v4-pro \
+  --services-file /home/gofr/devroot/gofr-agent/tmp/fixture-services.yml \
+  --openrouter-api-key sk-or-...
+```
+
+If you do not want the API key in shell history, prefer the environment
+variable form:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... \
+./scripts/start-real-server.sh \
+  --model openai:deepseek/deepseek-v4-pro \
+  --services-file /home/gofr/devroot/gofr-agent/tmp/fixture-services.yml
+```
+
+The helper starts the real MCP server on `http://gofr-agent-dev:8090/mcp` with
+dev auth enabled and UI-friendly Host/Origin/CORS defaults. For local UI MCP
+requests use the bearer token `dev-admin-token`.
+
+- `./scripts/start-real-server.sh` starts the MCP server on port `8090`; it does not start the mcpo proxy on `8091`.
+- `--no-services` overrides `--services-file` and starts the server with zero downstream services.
+- If `tmp/fixture-services.yml` already exists, `./scripts/start-real-server.sh` will auto-select it when `--services-file` is omitted.
+
+---
+
 ## Configuration
 
 `GofrAgentConfig.from_env()` is the typed configuration surface. Settings use
@@ -107,6 +145,10 @@ full table below.
 | `GOFR_AGENT_MCP_PORT` | `8090` | MCP server port |
 | `GOFR_AGENT_MCPO_PORT` | `8091` | OpenAI-compatible proxy port |
 | `GOFR_AGENT_SERVICES_FILE` | unset | Optional services manifest path |
+| `GOFR_AGENT_MCP_ALLOWED_HOSTS` | `127.0.0.1:*,localhost:*,[::1]:*` | Inbound `/mcp` Host header allow-list for FastMCP DNS rebinding protection |
+| `GOFR_AGENT_MCP_ALLOWED_ORIGINS` | empty | Inbound `/mcp` Origin allow-list; absent Origin is allowed for same-origin/non-browser calls |
+| `GOFR_AGENT_MCP_DNS_REBINDING_PROTECTION_ENABLED` | `true` | Enable FastMCP Host and Origin validation |
+| `GOFR_AGENT_CORS_ORIGINS` | empty | Optional browser CORS origin allow-list for direct browser/proxy preflight paths |
 | `GOFR_AGENT_HUB_ENABLED` | `false` | Enable the built-in results hub for descriptor handoff |
 | `GOFR_AGENT_HUB_URL` | unset | Public MCP URL other services use to call this agent's hub tools |
 | `GOFR_AGENT_HUB_DEFAULT_TTL_SECONDS` | `3600` | Default descriptor TTL, capped per stored result |
@@ -138,6 +180,14 @@ full table below.
 | `GOFR_AGENT_VERIFICATION_GAP_RESPONSE_ENABLED` | `false` | Return structured verification gaps and clarification requests |
 | `GOFR_AGENT_PROVENANCE_IN_RESPONSE_ENABLED` | `false` | Include structured tool provenance in final `ask` responses |
 | `GOFR_AGENT_LOG_LEVEL` | `INFO` | Logging level |
+
+MCP transport security is inbound protection for requests arriving at
+`gofr-agent`'s `/mcp` route. It is separate from
+`GOFR_AGENT_ALLOWED_SERVICE_HOSTS`, which only controls outbound dynamic service
+registration. Browser-facing origins such as `http://localhost:3000` are valid
+Origin values for local UI development, but container-to-container URLs must use
+Docker service names on `gofr-net`, such as `http://gofr-agent-dev:8090/mcp`.
+Do not use wildcard origins when browsers send `Authorization` headers.
 
 ---
 

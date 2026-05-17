@@ -14,7 +14,6 @@ import pytest
 from gofr_common.web import AuthHeaderMiddleware
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from mcp.server.transport_security import TransportSecuritySettings
 
 from app.agent.agent import GofrAgent
 from app.auth.permissions import AGENT_HUB_FETCH, AGENT_HUB_STORE
@@ -23,6 +22,7 @@ from app.mcp_server.mcp_server import create_mcp_server
 from app.services import ServiceConfig, ServicesManifest
 from app.services.registry import ServiceRegistry
 from app.sessions.store import SessionStore
+from app.transport_security import apply_transport_security
 from tests.fixtures.mcp_services import analytics, instruments
 from tests.fixtures.mcp_services._results_hub import GOFR_FIXTURES_HUB_CALLBACK_TOKEN
 from tests.fixtures.mcp_services._server import _UvicornThread, make_service_server
@@ -43,15 +43,16 @@ def _public_host() -> str:
 
 
 def _allow_host(mcp_app, public_host: str) -> None:  # type: ignore[no-untyped-def]
-    mcp_app.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            f"{public_host}:*",
-            "127.0.0.1:*",
-            "localhost:*",
-            "[::1]:*",
-        ],
-        allowed_origins=[],
+    apply_transport_security(
+        mcp_app,
+        GofrAgentConfig(
+            mcp_allowed_hosts=[
+                f"{public_host}:*",
+                "127.0.0.1:*",
+                "localhost:*",
+                "[::1]:*",
+            ]
+        ),
     )
 
 
