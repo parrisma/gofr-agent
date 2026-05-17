@@ -72,6 +72,12 @@ class TestGofrAgentConfig:
         assert cfg.hub_max_payload_bytes > 0
         assert cfg.hub_max_results > 0
         assert cfg.hub_protocol_version == 1
+        assert cfg.prompt_hardening_v2_enabled is False
+        assert cfg.caller_content_structured_enabled is False
+        assert cfg.intent_constraints_enabled is False
+        assert cfg.grounding_enforcement_enabled is False
+        assert cfg.verification_gap_response_enabled is False
+        assert cfg.provenance_in_response_enabled is False
         assert cfg.log_level == "INFO"
 
     def test_from_env_all_vars(self) -> None:
@@ -101,6 +107,12 @@ class TestGofrAgentConfig:
             "GOFR_AGENT_HUB_MAX_PAYLOAD_BYTES": "524288",
             "GOFR_AGENT_HUB_MAX_RESULTS": "250",
             "GOFR_AGENT_HUB_PROTOCOL_VERSION": "1",
+            "GOFR_AGENT_PROMPT_HARDENING_V2_ENABLED": "true",
+            "GOFR_AGENT_CALLER_CONTENT_STRUCTURED_ENABLED": "true",
+            "GOFR_AGENT_INTENT_CONSTRAINTS_ENABLED": "true",
+            "GOFR_AGENT_GROUNDING_ENFORCEMENT_ENABLED": "true",
+            "GOFR_AGENT_VERIFICATION_GAP_RESPONSE_ENABLED": "true",
+            "GOFR_AGENT_PROVENANCE_IN_RESPONSE_ENABLED": "true",
             "GOFR_AGENT_LOG_LEVEL": "DEBUG",
         }
         cfg = GofrAgentConfig.from_env(env=env)
@@ -129,6 +141,12 @@ class TestGofrAgentConfig:
         assert cfg.hub_max_payload_bytes == 524288
         assert cfg.hub_max_results == 250
         assert cfg.hub_protocol_version == 1
+        assert cfg.prompt_hardening_v2_enabled is True
+        assert cfg.caller_content_structured_enabled is True
+        assert cfg.intent_constraints_enabled is True
+        assert cfg.grounding_enforcement_enabled is True
+        assert cfg.verification_gap_response_enabled is True
+        assert cfg.provenance_in_response_enabled is True
         assert cfg.log_level == "DEBUG"
 
     def test_hub_enabled_requires_hub_url(self) -> None:

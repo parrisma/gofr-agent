@@ -1,5 +1,9 @@
 # Reasoning Stream Spec
 
+Status: Implemented and current. Live MCP reasoning notifications and final
+derived `steps` are present in the `ask` workflow. See
+[docs/current_state.md](../current_state.md) for repository-wide status.
+
 ## Purpose
 
 gofr-agent should make complex reasoning observable from day one. A caller
@@ -29,7 +33,7 @@ naming the existing project boundaries that must participate.
 ## Non-goals
 
 1. No OpenTelemetry tracing in the first reasoning-stream implementation.
-2. No Redis/Postgres/session persistence backend in the first implementation.
+2. No Redis/Postgres/session persistence backend in the current implementation.
 3. No full hierarchical memory or semantic retrieval over session history.
 4. No arbitrary user-selected model strings.
 5. No signed downstream service manifests yet.
@@ -47,6 +51,9 @@ sentinels before they re-enter model context. Session history is process-local
 but bounded through a rolling summary plus recent raw-message window.
 
 ## Target Behaviour
+
+This target behaviour is implemented in the current server and remains the
+contract for streaming clients.
 
 When a caller invokes `ask`, gofr-agent creates a request id and emits live MCP
 notifications for the run. Notifications represent model progress, tool calls,
@@ -297,9 +304,9 @@ Long sessions use a rolling summary plus recent raw window:
    findings, user preferences, and unresolved errors;
 5. summaries are treated as derived context, not trusted system instructions.
 
-The first implementation must include bounds for maximum sessions, maximum
-messages per session, and sweep interval. A persistent backend is a future
-implementation behind the same abstraction.
+The current implementation includes bounds for maximum sessions, maximum
+messages per session, and sweep interval. A persistent backend remains future
+work behind the same abstraction.
 
 ## Model Selection
 
@@ -363,7 +370,7 @@ After the hot path is migrated, code-quality checks should prevent new stdlib
 
 ## Configuration
 
-The implementation plan should add or rationalise configuration for:
+The current typed config includes:
 
 | Setting | Purpose |
 |---------|---------|
@@ -381,8 +388,8 @@ The implementation plan should add or rationalise configuration for:
 | `allowed_service_hosts` | Production registration allow-list |
 | `allowed_models` | Model override allow-list |
 
-`app/config.py` and `app/settings.py` must be rationalised so there is one
-clear configuration path.
+`app/config.py` is the live typed config path. `app/settings.py` remains a
+legacy wrapper and is tracked as cleanup in [docs/peer_review.md](peer_review.md).
 
 ## Validation and Error Semantics
 
@@ -465,7 +472,10 @@ The reasoning-stream work is complete when:
 | Dynamic registration becomes SSRF-like | Use production allow-list and health probe before registration |
 | Logging migration grows too wide | Limit first pass to reasoning path |
 
-## Open Items for Implementation Plan
+## Historical Open Items
+
+These items were resolved during implementation and are kept only for
+traceability.
 
 1. Confirm exact FastMCP notification API shape available in the installed MCP
    version.
@@ -475,5 +485,4 @@ The reasoning-stream work is complete when:
 4. Decide hard default values for all new configuration settings.
 5. Decide whether summary generation uses the main model or a configured cheaper
    summarisation model.
-6. Decide how much of the CLI streaming UX lands in the first implementation
-   slice.
+6. Decide how much of the CLI streaming UX lands in the implementation slice.

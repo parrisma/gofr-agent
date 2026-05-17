@@ -17,6 +17,8 @@ from pydantic_ai._run_context import RunContext
 from pydantic_ai.exceptions import ModelRetry, SkipToolValidation
 
 from app.agent.deps import AgentDeps
+from app.agent.intent import check_tool_allowed
+from app.agent.prompt_sanitizer import sanitize_metadata
 from app.auth.auth_service import AuthService
 from app.auth.permissions import downstream_activity, require_activity
 from app.exceptions import AuthorizationError, AuthTokenInvalidError, DownstreamToolError
@@ -60,6 +62,36 @@ def _artifacts_from_deps(deps: AgentDeps | str) -> list[Any]:
     if isinstance(deps, AgentDeps):
         return deps.artifacts
     return []
+
+
+def _record_tool_attempt(
+    deps: AgentDeps | str,
+    *,
+    service: str,
+    tool: str,
+    arguments: dict[str, Any],
+    attempt: int,
+    ok: bool,
+    latency_ms: int | None = None,
+    truncated: bool = False,
+    artifact_id: str | None = None,
+    as_of: str | None = None,
+    outcome: str | None = None,
+) -> str | None:
+    if not isinstance(deps, AgentDeps):
+        return None
+    return deps.record_tool_call(
+        service=service,
+        tool=tool,
+        arguments=arguments,
+        attempt=attempt,
+        ok=ok,
+        latency_ms=latency_ms,
+        truncated=truncated,
+        artifact_id=artifact_id,
+        as_of=as_of,
+        outcome=outcome,
+    ).args_hash
 
 
 def truncate_result(text: str, max_chars: int) -> str:
@@ -199,6 +231,24 @@ def _structured_value_from_result(result: Any, combined_text: str) -> Any:
     return _normalise_structured_value(parsed)
 
 
+def _extract_as_of(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key in ("as_of", "timestamp", "updated_at", "date"):
+            item = value.get(key)
+            if isinstance(item, str):
+                return item
+        for item in value.values():
+            nested = _extract_as_of(item)
+            if nested is not None:
+                return nested
+    if isinstance(value, list):
+        for item in value:
+            nested = _extract_as_of(item)
+            if nested is not None:
+                return nested
+    return None
+
+
 def _remember_structured_result(
     deps: AgentDeps | str,
     *,
@@ -237,6 +287,11 @@ def _schema_retry_message(
         parts.append(
             "Fetch OHLCV bars first and pass the full `bars` array from "
             "`instruments__get_ohlcv_history`; do not replace `bars` with date fields."
+        )
+    if missing:
+        parts.append(
+            "Do not guess missing factual arguments; use requester-provided values, "
+            "prior tool results, or descriptors, and ask the requester when they are unavailable."
         )
 
     path = ".".join(str(part) for part in exc.absolute_path)
@@ -289,6 +344,8 @@ def make_tool(
     auth_service: AuthService,
     max_chars: int = 8000,
     retry_attempts: int = 2,
+    enforce_intent: bool = False,
+    sanitize_description: bool = False,
 ) -> Tool:  # type: ignore[type-arg]
     """Build a pydantic-ai :class:`Tool` that calls *info* via *pool*.
 
@@ -297,7 +354,9 @@ def make_tool(
     authorise the downstream activity before making the call.
     """
     tool_name = f"{info.service_name}__{info.name}"
-    tool_description = info.description
+    tool_description = (
+        sanitize_metadata(info.description) if sanitize_description else info.description
+    )
     activity = downstream_activity(info.service_name, info.name)
     input_schema = _normalise_input_schema(info.input_schema)
     schema_validator = validator_for(input_schema)(input_schema)
@@ -306,6 +365,44 @@ def make_tool(
         kwargs = _enrich_missing_args(ctx.deps, input_schema, kwargs)
         token = _token_from_deps(ctx.deps)
         attempts = max(retry_attempts, 1)
+
+        if enforce_intent and isinstance(ctx.deps, AgentDeps):
+            allowed, denial = check_tool_allowed(
+                ctx.deps.intent_constraints,
+                service=info.service_name,
+                tool=info.name,
+            )
+            if not allowed:
+                args_hash = _record_tool_attempt(
+                    ctx.deps,
+                    service=info.service_name,
+                    tool=info.name,
+                    arguments=kwargs,
+                    attempt=1,
+                    ok=False,
+                    truncated=False,
+                    outcome="constraint_blocked",
+                )
+                return _wrap_tool_payload(
+                    {
+                        "ok": False,
+                        "service": info.service_name,
+                        "tool": info.name,
+                        "attempt": 1,
+                        "truncated": False,
+                        "args_hash": args_hash,
+                        "error": {
+                            "service": info.service_name,
+                            "tool": info.name,
+                            "message": denial or "tool call blocked by requester constraints",
+                            "transient": False,
+                            "fatal": False,
+                            "recovery_hint": (
+                                "Adjust requester constraints or use an allowed service."
+                            ),
+                        },
+                    }
+                )
 
         for attempt in range(1, attempts + 1):
             started_at = perf_counter()
@@ -332,12 +429,27 @@ def make_tool(
                 combined = "\n".join(text_parts)
                 truncated = len(combined) > max_chars
                 wrapped = truncate_result(combined, max_chars)
+                structured_value = _structured_value_from_result(result, combined)
                 artifact_id = _remember_structured_result(
                     ctx.deps,
                     service=info.service_name,
                     tool=info.name,
                     arguments=kwargs,
-                    value=_structured_value_from_result(result, combined),
+                    value=structured_value,
+                )
+                latency_ms = int((perf_counter() - started_at) * 1000)
+                as_of = _extract_as_of(structured_value)
+                args_hash = _record_tool_attempt(
+                    ctx.deps,
+                    service=info.service_name,
+                    tool=info.name,
+                    arguments=kwargs,
+                    attempt=attempt,
+                    ok=True,
+                    latency_ms=latency_ms,
+                    truncated=truncated,
+                    artifact_id=artifact_id,
+                    as_of=as_of,
                 )
                 payload: dict[str, Any] = {
                     "ok": True,
@@ -345,11 +457,14 @@ def make_tool(
                     "tool": info.name,
                     "attempt": attempt,
                     "truncated": truncated,
-                    "latency_ms": int((perf_counter() - started_at) * 1000),
+                    "latency_ms": latency_ms,
+                    "args_hash": args_hash,
                     "content": wrapped,
                 }
                 if artifact_id is not None:
                     payload["artifact_id"] = artifact_id
+                if as_of is not None:
+                    payload["as_of"] = as_of
                 return _wrap_tool_payload(payload)
             except Exception as exc:
                 error = _classify_tool_error(info.service_name, info.name, exc)
@@ -357,6 +472,18 @@ def make_tool(
                     continue
                 if error.fatal:
                     raise error from exc
+                latency_ms = int((perf_counter() - started_at) * 1000)
+                args_hash = _record_tool_attempt(
+                    ctx.deps,
+                    service=info.service_name,
+                    tool=info.name,
+                    arguments=kwargs,
+                    attempt=attempt,
+                    ok=False,
+                    latency_ms=latency_ms,
+                    truncated=False,
+                    outcome="tool_error",
+                )
                 return _wrap_tool_payload(
                     {
                         "ok": False,
@@ -364,6 +491,8 @@ def make_tool(
                         "tool": info.name,
                         "attempt": attempt,
                         "truncated": False,
+                        "latency_ms": latency_ms,
+                        "args_hash": args_hash,
                         "error": error.as_payload(),
                     }
                 )
@@ -383,7 +512,8 @@ def make_tool(
         if missing_descriptor_arg is not None:
             raise ModelRetry(
                 f"Tool {tool_name} requires descriptor argument {missing_descriptor_arg}; "
-                "pass it directly from the previous tool's response."
+                "pass it directly from the previous tool's response. Descriptor summaries "
+                "are not authoritative evidence; copy descriptor arguments verbatim."
             )
         try:
             schema_validator.validate(enriched)

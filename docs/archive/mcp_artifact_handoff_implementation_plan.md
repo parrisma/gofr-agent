@@ -1,7 +1,8 @@
 # MCP Results Hub Implementation Plan
 
 Status: COMPLETE (validated 2026-05-16)
-Spec: `docs/mcp_artifact_handoff_spec.md`
+Spec: `docs/archive/mcp_artifact_handoff_spec.md`
+Downstream participant spec: `docs/archive/results_hub_mcp_server_spec.md`
 
 ## Read This First
 

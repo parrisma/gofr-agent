@@ -105,6 +105,29 @@ class TestReasoningEvents:
         assert event["truncated"] is True
         assert event["summary"]["text"] == "abcde...[truncated]"
 
+    def test_truncation_preserves_provenance_fields(self) -> None:
+        collector = EventCollector("req-1", "sess-1", max_payload_chars=4)
+
+        recorded = collector.record(
+            ToolResultEvent(
+                request_id="req-1",
+                session_id="sess-1",
+                service="svc-name-that-stays",
+                tool="tool-name-that-stays",
+                ok=True,
+                summary="x" * 100,
+                args_hash="hash-that-stays",
+                artifact_id="artifact-that-stays",
+                as_of="2026-05-13T00:00:00Z",
+            )
+        )
+
+        assert recorded["service"] == "svc-name-that-stays"
+        assert recorded["tool"] == "tool-name-that-stays"
+        assert recorded["args_hash"] == "hash-that-stays"
+        assert recorded["artifact_id"] == "artifact-that-stays"
+        assert recorded["as_of"] == "2026-05-13T00:00:00Z"
+
     def test_text_delta_coalescing_preserves_order(self) -> None:
         coalescer = TextDeltaCoalescer(window_ms=50)
 

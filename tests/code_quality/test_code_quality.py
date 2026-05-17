@@ -11,6 +11,7 @@ All linting and security issues must be fixed or explicitly suppressed with
 a comment explaining why (e.g., # noqa: F401 - imported for re-export).
 """
 
+import ast
 import subprocess
 from pathlib import Path
 
@@ -292,6 +293,41 @@ class TestCodeQuality:
             pytest.fail(
                 "\n".join(
                     ["Stdlib logging is forbidden in migrated modules:"] + violations
+                )
+            )
+
+    def test_adversarial_fixture_imports_are_isolated(self, project_root: Path) -> None:
+        """Keep adversarial prompt-hardening fixtures out of generic test paths."""
+        tests_dir = project_root / "tests"
+        if not tests_dir.exists():
+            pytest.skip("tests/ not found yet")
+
+        allowed_prefixes = (
+            "tests/fixtures/mcp_services/adversarial/",
+            "tests/integration/test_prompt_hardening_",
+        )
+        forbidden_module = "tests.fixtures.mcp_services.adversarial"
+        violations: list[str] = []
+
+        for file_path in tests_dir.rglob("*.py"):
+            relative_path = file_path.relative_to(project_root).as_posix()
+            if relative_path.startswith(allowed_prefixes):
+                continue
+            tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=relative_path)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    if node.module.startswith(forbidden_module):
+                        violations.append(f"{relative_path}:{node.lineno}: {node.module}")
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name.startswith(forbidden_module):
+                            violations.append(f"{relative_path}:{node.lineno}: {alias.name}")
+
+        if violations:
+            pytest.fail(
+                "\n".join(
+                    ["Adversarial fixtures may only be imported by prompt-hardening tests:"]
+                    + violations
                 )
             )
 

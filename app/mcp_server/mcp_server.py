@@ -83,9 +83,13 @@ def _validate_ask_request(
     config: GofrAgentConfig,
     question: str,
     context: str | None,
+    instructions: str | None,
+    asserted_facts: list[str] | None,
+    pasted_content: list[str] | None,
+    output_format: str | None,
     max_steps: int | None,
     model_override: str | None,
-) -> tuple[str, int, str | None]:
+) -> tuple[str, int, str | None, str | None]:
     cleaned_question = question.strip()
     if not cleaned_question:
         _raise_invalid_params("question must not be empty")
@@ -97,6 +101,21 @@ def _validate_ask_request(
         _raise_invalid_params(
             f"context exceeds max_context_chars ({config.max_context_chars})"
         )
+    context_chars = len(context or "") + len(instructions or "")
+    for value in asserted_facts or []:
+        context_chars += len(value)
+    for value in pasted_content or []:
+        context_chars += len(value)
+    if context_chars > config.max_context_chars:
+        _raise_invalid_params(
+            f"caller content exceeds max_context_chars ({config.max_context_chars})"
+        )
+
+    cleaned_output_format = None
+    if output_format is not None:
+        cleaned_output_format = output_format.strip().lower()
+        if cleaned_output_format not in {"json", "text"}:
+            _raise_invalid_params("output_format must be 'json' or 'text'")
 
     resolved_max_steps = config.max_steps if max_steps is None else max_steps
     if resolved_max_steps < 1:
@@ -112,7 +131,7 @@ def _validate_ask_request(
         if not cleaned_model_override:
             _raise_invalid_params("model_override must not be empty when provided")
 
-    return cleaned_question, resolved_max_steps, cleaned_model_override
+    return cleaned_question, resolved_max_steps, cleaned_model_override, cleaned_output_format
 
 
 def _guard(
@@ -188,7 +207,11 @@ def create_mcp_server(
     """
     mcp = FastMCP(
         name="gofr-agent",
-        instructions="Reasoning agent that orchestrates downstream MCP services.",
+        instructions=(
+            "Fact-grounded, intent-preserving reasoning agent that orchestrates "
+            "downstream MCP services and reports verification gaps when facts "
+            "cannot be verified."
+        ),
     )
     store = result_store or ResultStore(config)
 
@@ -386,26 +409,50 @@ def create_mcp_server(
         question: str,
         session_id: str | None = None,
         context: str | None = None,
+        instructions: str | None = None,
+        asserted_facts: list[str] | None = None,
+        pasted_content: list[str] | None = None,
+        forbidden_services: list[str] | None = None,
+        forbidden_tools: list[str] | None = None,
+        allowed_services: list[str] | None = None,
+        tools_only: bool | None = None,
+        output_format: str | None = None,
+        no_commentary: bool | None = None,
         max_steps: int | None = None,
         model_override: str | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
-        """Query the reasoning agent and return the answer plus metadata."""
+        """Query the fact-grounded agent and return answers, gaps, and provenance."""
         upstream_request_id = str(ctx.request_id) if ctx is not None else None
         request_token, request_id = set_request_id(upstream_request_id)
         try:
             token = _guard(auth_service, AGENT_ASK)
-            question, max_steps, model_override = _validate_ask_request(
+            question, max_steps, model_override, output_format = _validate_ask_request(
                 config,
                 question,
                 context,
+                instructions,
+                asserted_facts,
+                pasted_content,
+                output_format,
                 max_steps,
                 model_override,
             )
             if model_override is not None:
                 _guard(auth_service, AGENT_MODEL_OVERRIDE)
                 if model_override not in config.allowed_models:
+                    logger.warning(
+                        "model override rejected",
+                        model_override=model_override,
+                        reason="not_allowed",
+                        **request_log_fields(),
+                    )
                     _raise_invalid_params("model_override is not in allowed_models")
+                logger.info(
+                    "model override accepted",
+                    model_override=model_override,
+                    **request_log_fields(),
+                )
 
             session = await session_store.get_or_create(session_id)
             notifier = None
@@ -442,6 +489,15 @@ def create_mcp_server(
                 question,
                 session,
                 context=context,
+                instructions=instructions,
+                asserted_facts=asserted_facts,
+                pasted_content=pasted_content,
+                forbidden_services=forbidden_services,
+                forbidden_tools=forbidden_tools,
+                allowed_services=allowed_services,
+                tools_only=tools_only,
+                output_format=output_format,
+                no_commentary=no_commentary,
                 max_steps=max_steps,
                 model_override=model_override,
                 event_sink=event_sink,
@@ -463,6 +519,17 @@ def create_mcp_server(
                 "steps": result.steps,
                 "model": result.model,
                 "tokens_used": result.tokens_used,
+                "verification_gap": (
+                    result.verification_gap.model_dump(mode="json")
+                    if result.verification_gap is not None
+                    else None
+                ),
+                "clarification_request": (
+                    result.clarification_request.model_dump(mode="json")
+                    if result.clarification_request is not None
+                    else None
+                ),
+                "provenance": [record.model_dump(mode="json") for record in result.provenance],
             }
         finally:
             reset_request_id(request_token)

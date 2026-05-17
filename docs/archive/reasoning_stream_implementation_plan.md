@@ -1,7 +1,7 @@
 # Reasoning Stream Implementation Plan
 
 Status: COMPLETED (implemented and validated on 2026-05-15).
-Spec: `docs/reasoning_stream_spec.md`
+Spec: `docs/archive/reasoning_stream_spec.md`
 Review basis: `docs/peer_review.md`
 Downstream consumer doc that MUST be kept in sync: `docs/react_integration_guide.md`
 

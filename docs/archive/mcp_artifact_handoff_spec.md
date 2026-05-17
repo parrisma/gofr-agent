@@ -1,7 +1,11 @@
 # MCP Results Hub Handoff Spec
 
-Status: DRAFT v3
+Status: Current implementation reference v1
 Review basis: `docs/peer_review.md`
+
+For downstream MCP server requirements, see
+[docs/results_hub_mcp_server_spec.md](results_hub_mcp_server_spec.md). For
+repository-wide implementation status, see [docs/current_state.md](../current_state.md).
 
 ## Purpose
 
@@ -43,12 +47,12 @@ retired.
 ## Non-goals
 
 1. No service mesh between downstream services.
-2. No descriptor signing in the first implementation.
-3. No permanent result storage in the first implementation.
-4. No binary/blob streaming in the first implementation.
+2. No descriptor signing in the current implementation.
+3. No permanent result storage in the current implementation.
+4. No binary/blob streaming in the current implementation.
 5. No migration of every tool at once; start with the OHLCV analytics workflow.
-6. No multi-replica gofr-agent in the first implementation.
-7. No per-end-user ownership rule for result fetches in the first implementation.
+6. No multi-replica gofr-agent in the current implementation.
+7. No per-end-user ownership rule for result fetches in the current implementation.
 
 ## Trust Model
 
@@ -120,7 +124,7 @@ End-user `ask` tokens must not receive these activities.
 
 ## Deployment Assumptions
 
-The first implementation assumes:
+The current implementation assumes:
 
 1. exactly one gofr-agent process serves a given downstream stack;
 2. the hub result store is process-local;
@@ -143,7 +147,7 @@ The hub URL is not optional when the hub is enabled.
 | `GOFR_AGENT_HUB_DEFAULT_TTL_SECONDS` | Default result lifetime |
 | `GOFR_AGENT_HUB_MAX_PAYLOAD_BYTES` | Maximum stored payload size |
 | `GOFR_AGENT_HUB_MAX_RESULTS` | Maximum concurrent stored results |
-| `GOFR_AGENT_HUB_PROTOCOL_VERSION` | Hub protocol version string |
+| `GOFR_AGENT_HUB_PROTOCOL_VERSION` | Hub protocol version integer |
 
 gofr-agent refuses to advertise hub capability if `GOFR_AGENT_HUB_ENABLED` is
 true and `GOFR_AGENT_HUB_URL` is unset or local-only.
@@ -368,7 +372,7 @@ Required behaviour:
 6. return structured errors for unknown, expired, oversized, unauthorised,
    malformed, and capability-denied requests.
 
-First implementation is process-local. Multi-replica deployment requires a
+Current implementation is process-local. Multi-replica deployment requires a
 shared store or sticky routing.
 
 ## Registry Capabilities

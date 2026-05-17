@@ -45,6 +45,51 @@ def ask(
         "--max-steps",
         help="Maximum downstream tool-call iterations for this question.",
     ),
+    context: str | None = typer.Option(
+        None,
+        "--context",
+        help="Legacy context to treat as pasted data.",
+    ),
+    instructions: str | None = typer.Option(
+        None,
+        "--instructions",
+        help="Authenticated requester instructions for this run.",
+    ),
+    asserted_fact: list[str] | None = typer.Option(
+        None,
+        "--asserted-fact",
+        help="Caller-asserted fact to provide as non-authoritative input.",
+    ),
+    pasted_content: list[str] | None = typer.Option(
+        None,
+        "--pasted-content",
+        help="Third-party content to treat as data only.",
+    ),
+    forbidden_service: list[str] | None = typer.Option(
+        None,
+        "--forbidden-service",
+        help="Service the agent must not call.",
+    ),
+    forbidden_tool: list[str] | None = typer.Option(
+        None,
+        "--forbidden-tool",
+        help="Tool the agent must not call.",
+    ),
+    allowed_service: list[str] | None = typer.Option(
+        None,
+        "--allowed-service",
+        help="Restrict tool calls to this service. Repeat for multiple services.",
+    ),
+    tools_only: bool = typer.Option(
+        False,
+        "--tools-only",
+        help="Require factual answers to come from tools.",
+    ),
+    no_commentary: bool = typer.Option(
+        False,
+        "--no-commentary",
+        help="Ask for no extra commentary in the final answer.",
+    ),
     quiet: bool = typer.Option(
         False,
         "--quiet",
@@ -80,6 +125,15 @@ def ask(
             url=url,
             token=token,
             max_steps=max_steps,
+            context=context,
+            instructions=instructions,
+            asserted_facts=asserted_fact,
+            pasted_content=pasted_content,
+            forbidden_services=forbidden_service,
+            forbidden_tools=forbidden_tool,
+            allowed_services=allowed_service,
+            tools_only=tools_only,
+            no_commentary=no_commentary,
             quiet=quiet,
             verbose=verbose,
             output_format=output_format,
@@ -94,6 +148,15 @@ async def _run(
     url: str,
     token: str,
     max_steps: int,
+    context: str | None,
+    instructions: str | None,
+    asserted_facts: list[str] | None,
+    pasted_content: list[str] | None,
+    forbidden_services: list[str] | None,
+    forbidden_tools: list[str] | None,
+    allowed_services: list[str] | None,
+    tools_only: bool,
+    no_commentary: bool,
     quiet: bool,
     verbose: bool,
     output_format: str,
@@ -127,9 +190,31 @@ async def _run(
             typer.echo("Error: Provide a question or use --reset.", err=True)
             raise typer.Exit(code=1)
 
-        params: dict[str, object] = {"question": question, "max_steps": max_steps}
+        params: dict[str, object] = {
+            "question": question,
+            "max_steps": max_steps,
+            "output_format": output_format,
+        }
         if session_id is not None:
             params["session_id"] = session_id
+        if context is not None:
+            params["context"] = context
+        if instructions is not None:
+            params["instructions"] = instructions
+        if asserted_facts:
+            params["asserted_facts"] = asserted_facts
+        if pasted_content:
+            params["pasted_content"] = pasted_content
+        if forbidden_services:
+            params["forbidden_services"] = forbidden_services
+        if forbidden_tools:
+            params["forbidden_tools"] = forbidden_tools
+        if allowed_services:
+            params["allowed_services"] = allowed_services
+        if tools_only:
+            params["tools_only"] = True
+        if no_commentary:
+            params["no_commentary"] = True
 
         result = await client.call_tool("ask", params)
         payload = _extract_result_payload(result)
@@ -172,10 +257,48 @@ def _print_payload(payload: dict[str, Any], *, quiet: bool) -> None:
         return
 
     typer.echo(f"\nAnswer: {answer}")
+    _print_gap_or_clarification(payload)
+    _print_provenance(payload)
     if payload.get("session_id"):
         typer.echo(f"Session: {payload['session_id']}")
     if payload.get("tokens_used"):
         typer.echo(f"Tokens: {payload['tokens_used']}")
+
+
+def _print_gap_or_clarification(payload: dict[str, Any]) -> None:
+    gap = payload.get("verification_gap")
+    if isinstance(gap, dict):
+        typer.echo(f"Verification gap: {gap.get('requested_fact', 'unknown fact')}")
+        typer.echo(f"Reason: {gap.get('reason', 'unknown')}")
+        attempts = gap.get("attempted")
+        if isinstance(attempts, list) and attempts:
+            typer.echo(f"Attempts: {len(attempts)}")
+
+    clarification = payload.get("clarification_request")
+    if isinstance(clarification, dict):
+        fields = clarification.get("missing_fields", [])
+        if isinstance(fields, list):
+            typer.echo(f"Clarification needed: {', '.join(str(field) for field in fields)}")
+        prompt = clarification.get("prompt")
+        if prompt:
+            typer.echo(str(prompt))
+
+
+def _print_provenance(payload: dict[str, Any]) -> None:
+    provenance = payload.get("provenance")
+    if not isinstance(provenance, list) or not provenance:
+        return
+    refs: list[str] = []
+    for record in provenance:
+        if not isinstance(record, dict):
+            continue
+        service = record.get("service")
+        tool = record.get("tool")
+        args_hash = record.get("args_hash")
+        if service and tool and args_hash:
+            refs.append(f"{service}.{tool}:{args_hash}")
+    if refs:
+        typer.echo(f"Provenance: {', '.join(refs)}")
 
 
 class EventRenderer:

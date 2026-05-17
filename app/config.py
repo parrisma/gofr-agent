@@ -59,6 +59,14 @@ class GofrAgentConfig(BaseModel):
     hub_max_results: int = Field(default=256, ge=1)
     hub_protocol_version: int = Field(default=1, ge=1)
 
+    # Prompt hardening rollout flags. Defaults preserve current behaviour.
+    prompt_hardening_v2_enabled: bool = False
+    caller_content_structured_enabled: bool = False
+    intent_constraints_enabled: bool = False
+    grounding_enforcement_enabled: bool = False
+    verification_gap_response_enabled: bool = False
+    provenance_in_response_enabled: bool = False
+
     # Logging
     log_level: str = "INFO"
 
@@ -152,6 +160,18 @@ class GofrAgentConfig(BaseModel):
             hub_max_payload_bytes=int(_get("HUB_MAX_PAYLOAD_BYTES", "524288")),
             hub_max_results=int(_get("HUB_MAX_RESULTS", "256")),
             hub_protocol_version=int(_get("HUB_PROTOCOL_VERSION", "1")),
+            prompt_hardening_v2_enabled=_get_bool("PROMPT_HARDENING_V2_ENABLED", False),
+            caller_content_structured_enabled=_get_bool(
+                "CALLER_CONTENT_STRUCTURED_ENABLED",
+                False,
+            ),
+            intent_constraints_enabled=_get_bool("INTENT_CONSTRAINTS_ENABLED", False),
+            grounding_enforcement_enabled=_get_bool("GROUNDING_ENFORCEMENT_ENABLED", False),
+            verification_gap_response_enabled=_get_bool(
+                "VERIFICATION_GAP_RESPONSE_ENABLED",
+                False,
+            ),
+            provenance_in_response_enabled=_get_bool("PROVENANCE_IN_RESPONSE_ENABLED", False),
             log_level=_get("LOG_LEVEL", "INFO"),
         )
 

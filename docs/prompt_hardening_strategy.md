@@ -1,5 +1,10 @@
 # Prompt Hardening Strategy
 
+Status: Implemented behind default-off runtime flags. See
+[docs/archive/prompt_hardening_implementation_plan.md](archive/prompt_hardening_implementation_plan.md)
+for the closeout ledger and [docs/current_state.md](current_state.md) for the
+repository-wide current-state map.
+
 ## Purpose
 
 gofr-agent must behave like a trustworthy human assistant: it deals only in
@@ -9,8 +14,9 @@ about how to use tools, combine tool outputs, and format answers, but factual
 claims must be grounded in registered MCP service results whenever such a
 service exists, and the user's intent must be preserved literally.
 
-This document identifies embedded prompt surfaces in the current codebase and
-describes how to harden them toward this contract. The contract has two halves:
+This document identifies embedded prompt surfaces in the codebase and describes
+the contract implemented by the hardened prompt path. The contract has two
+halves:
 
 1. Factual grounding: never answer from LLM memory or assumptions for facts in
    scope for a registered service.
@@ -60,6 +66,10 @@ surface can be controlled by anyone other than the operator who wrote the
 system prompt: a downstream service author, a runtime registrant, a producer
 of hub results, or the requester themselves.
 
+The `Hardening needed` column is retained as the implementation target that was
+closed by the prompt-hardening work; it should be read as the historical action
+taken, not as an open TODO.
+
 | Surface | Location | Current role | Attacker-influenceable | Hardening needed |
 |---------|----------|--------------|------------------------|------------------|
 | System preamble | `app/agent/system_prompt.py` `_PREAMBLE` | Defines the agent identity, tool-use policy, citation requirement, tool-result safety, and descriptor handling. | No | Replace permissive wording with the Factual Grounding, Intent Preservation, and Untrusted Data rules. |
@@ -81,9 +91,9 @@ of hub results, or the requester themselves.
 | Descriptor schema field description | `tests/fixtures/mcp_services/analytics.py` `_BarsRef` | Tells the model to pass `bars_ref` verbatim. | Yes (fixture/downstream authors) | Keep pattern. Generalise for all descriptor inputs. Descriptor fields are copied, not interpreted. |
 | Runtime registration descriptions | `app/mcp_server/mcp_server.py` `register_service(... description=...)` and `app/services/__init__.py` env-loaded descriptions | User or config supplied descriptions that can enter the system prompt. | Yes (registrant, env) | Treat as untrusted. Length-bound, neutralise imperatives, and never permit them to change factual or intent policy. |
 
-## Highest-Risk Current Wording
+## Retired High-Risk Wording
 
-The most important current prompt text to harden is in
+The most important prompt text that was hardened was in
 `app/agent/system_prompt.py`:
 
 1. `Use tools when they can answer the user's question more accurately or completely than you can from memory alone.`
@@ -95,7 +105,7 @@ model decide it already has enough information, frames tool use as an accuracy
 boost rather than the factual authority, and gives an open licence to answer
 from memory when no tool is "relevant" in the model's own judgement.
 
-Recommended replacement preamble:
+Implemented replacement preamble shape:
 
 ```text
 You are a fact-grounded, intent-preserving reasoning agent that orchestrates
@@ -187,6 +197,45 @@ A verification gap is a successful run, not a failure. The `ask` final
 response should carry it as a first-class field alongside `answer` and
 `steps`.
 
+Current JSON shape:
+
+```json
+{
+   "request_id": "req-123",
+   "requested_fact": "AAPL exchange code",
+   "attempted": [
+      {
+         "service": "instruments",
+         "tool": "instrument_lookup",
+         "args_summary": {"args_hash": "abc123"},
+         "outcome": "ok"
+      }
+   ],
+   "reason": "tool_error",
+   "options": [
+      "register a service that can verify the requested fact",
+      "supply the fact as caller-asserted input",
+      "narrow the request to a verifiable or non-factual part"
+   ]
+}
+```
+
+Allowed `reason` values are `no_service_registered`, `tool_error`,
+`empty_result`, `schema_mismatch`, `contradiction`, `policy_denied`,
+`constraint_blocked`, and `max_steps_reached`.
+
+Clarification requests use this JSON shape:
+
+```json
+{
+   "request_id": "req-123",
+   "question": "Compute volatility",
+   "missing_fields": ["ticker", "date_range", "window"],
+   "reason": "materially_under_specified",
+   "prompt": "Please provide the missing field(s): ticker, date_range, window."
+}
+```
+
 ## Provenance and Citation Contract
 
 Every factual claim in a final answer must carry provenance.
@@ -200,6 +249,37 @@ Minimum citation record per factual claim:
 | `args_hash_or_descriptor_id` | Stable identifier of the call inputs |
 | `request_id` | Run identifier |
 | `as_of` | Freshness timestamp when available |
+
+Current provenance JSON shape:
+
+```json
+{
+   "request_id": "req-123",
+   "service": "instruments",
+   "tool": "instrument_lookup",
+   "args_hash": "abc123",
+   "artifact_id": "tool_result_1",
+   "attempt": 1,
+   "ok": true,
+   "latency_ms": 12,
+   "truncated": false,
+   "as_of": "2026-05-13"
+}
+```
+
+Intent constraints use this JSON shape internally and are derived only from
+structured `ask` fields plus authenticated requester `instructions`:
+
+```json
+{
+   "forbidden_services": ["trades"],
+   "forbidden_tools": ["analytics.simple_return"],
+   "allowed_services": ["instruments"],
+   "tools_only": true,
+   "output_format": "json",
+   "no_commentary": true
+}
+```
 
 Surface rules:
 
@@ -265,6 +345,8 @@ Rules:
 3. Keep downstream protocol tools hidden from the model by exact reserved
    name. Assert by test that `_register_results_hub`, `_store_result`,
    `_get_result`, and `_describe_result` never appear in the prompt.
+   Reserved hub protocol tool names never appear in the model-visible
+   prompt.
 4. Never surface descriptor `summary` to the model as standalone evidence.
 
 ### Phase 3: Runtime enforcement beyond prompts

@@ -43,6 +43,8 @@ pythonpath = ["."]
 addopts = "--strict-markers"
 markers = [
     "openrouter: tests that make real calls to OpenRouter (require OPENROUTER_API_KEY)",
+    "live_llm: live LLM prompt-hardening scenario tests",
+    "tier(name): OpenRouter tier marker for prompt-hardening scenarios",
 ]
 
 [tool.ruff]

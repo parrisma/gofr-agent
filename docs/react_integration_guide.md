@@ -16,6 +16,9 @@ This document describes:
   recommended extension (interactive "ask the user" pause/resume).
 6. Reference TypeScript snippets the React-side LLM can adapt directly.
 
+For repository-wide implementation status, see
+[docs/current_state.md](current_state.md).
+
 ---
 
 ## 1. What gofr-agent is
@@ -32,8 +35,9 @@ Key facts:
 - Default URL inside the dev container: `http://gofr-agent:8090/mcp`.
 - Browser clients need whatever externally reachable origin the deployment
   exposes; inside the Docker dev network, use the `gofr-agent` service name.
-- LLM backend: configurable. Default in dev: `deepseek/deepseek-v4-pro`
-  via OpenRouter.
+- LLM backend: configurable through `GOFR_AGENT_LLM_MODEL`; the server config
+  default is `openai:gpt-4o-mini`. Fixture chat and live smoke helpers default
+  to `deepseek/deepseek-v4-pro` via OpenRouter in this repository.
 - Auth: Bearer token in the `Authorization` HTTP header. Required on
   every request. Dev token is `dev-admin-token`.
 - Sessions: server-side conversation history keyed by `session_id`
@@ -94,6 +98,9 @@ const result = await client.callTool({
     question: "Question text",
     session_id: "ui-session-1",
     max_steps: 25,
+    instructions: "Return compact JSON only",
+    forbidden_services: ["trades"],
+    tools_only: true,
   },
 });
 ```
@@ -152,8 +159,20 @@ Treat those descriptors as internal references only:
   - `session_id` (string, optional): client-chosen ID. If omitted, the
     server generates one and returns it. Reuse the same ID for follow-up
     turns to keep conversation context.
-  - `context` (string, optional): extra free-text context prepended to
-    the question.
+  - `context` (string, optional): legacy free-text context. When structured
+    caller content is enabled, it is treated as pasted third-party data only.
+  - `instructions` (string, optional): authenticated requester instructions
+    for constraints and output shape.
+  - `asserted_facts` (string array, optional): caller-asserted facts, not
+    authoritative.
+  - `pasted_content` (string array, optional): third-party content treated as
+    data only.
+  - `forbidden_services`, `forbidden_tools`, `allowed_services` (string arrays,
+    optional): runtime tool-use constraints.
+  - `tools_only` (boolean, optional): require factual answers to come from
+    registered tools.
+  - `output_format` (`"json"` or `"text"`, optional): requested answer shape.
+  - `no_commentary` (boolean, optional): request no extra prose.
   - `max_steps` (int, optional, default 10): hard cap on tool-call
     iterations the agent is allowed for this question. Increase for
     complex multi-service questions (20–30 is typical).
@@ -170,7 +189,10 @@ Treat those descriptors as internal references only:
       {"kind": "run_completed", "sequence": 7}
     ],
     "model": "deepseek/deepseek-v4-pro",
-    "tokens_used": 1234
+    "tokens_used": 1234,
+    "verification_gap": null,
+    "clarification_request": null,
+    "provenance": []
   }
   ```
 - **Important**: `ask` still returns its final response only once the run has
@@ -178,6 +200,10 @@ Treat those descriptors as internal references only:
   run. `steps` is a compact non-text subset derived from that same event
   sequence. Tool-using runs and summary-compaction runs produce non-empty
   `steps`.
+  If `verification_gap` is present, show it as a successful run outcome rather
+  than a transport error. If `clarification_request` is present, ask the user
+  for the listed `missing_fields`. If `provenance` is present, verbose/debug
+  views should expose service/tool references and `as_of` freshness values.
 
 ### `reset_session`
 - Args: `{ session_id: string }`.

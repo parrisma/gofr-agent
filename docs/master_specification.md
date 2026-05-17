@@ -1,8 +1,10 @@
 # gofr-agent Specification
 
-> **Status:** Draft v0.2 — open questions resolved  
-> **Port allocation:** `GOFR_AGENT_MCP=8090`, `GOFR_AGENT_MCPO=8091`, `GOFR_AGENT_WEB=8092`  
-> **Port registration:** to be added to `gofr-common/config/gofr_ports.env` and `ports.py`
+> **Status:** Current implementation reference v0.3
+> **Port allocation:** `GOFR_AGENT_MCP=8090`, `GOFR_AGENT_MCPO=8091`, `GOFR_AGENT_WEB=8092`
+
+For a short map of implemented surfaces and validation evidence, see
+[docs/current_state.md](current_state.md).
 
 ---
 
@@ -141,6 +143,9 @@ Descriptors are internal tool-facing references, not end-user payloads. The
 model may see descriptor metadata, but it must not receive the large stored
 payload itself.
 
+Downstream MCP servers that want to participate in this model should implement
+the contract in [docs/archive/results_hub_mcp_server_spec.md](archive/results_hub_mcp_server_spec.md).
+
 ---
 
 ## 4. Tool Discovery
@@ -178,7 +183,16 @@ The primary interface.
 |---|---|---|---|
 | `question` | str | yes | Natural-language question or instruction |
 | `session_id` | str \| None | no | Opaque ID to continue a prior conversation; omit to start a new session |
-| `context` | str \| None | no | Optional caller-supplied context appended to system prompt |
+| `context` | str \| None | no | Legacy caller context; treated as pasted data when structured caller content is enabled |
+| `instructions` | str \| None | no | Authenticated requester instructions for constraints and output shape |
+| `asserted_facts` | list[str] \| None | no | Caller-asserted facts, not authoritative |
+| `pasted_content` | list[str] \| None | no | Third-party content treated as data only |
+| `forbidden_services` | list[str] \| None | no | Services the agent must not call |
+| `forbidden_tools` | list[str] \| None | no | Tool names the agent must not call |
+| `allowed_services` | list[str] \| None | no | Optional service allow-list |
+| `tools_only` | bool \| None | no | Require factual answers to come from tools |
+| `output_format` | "json" \| "text" \| None | no | Requested answer shape |
+| `no_commentary` | bool \| None | no | Request no extra prose in the final answer |
 | `max_steps` | int | no (default 10) | Hard cap on reasoning iterations |
 | `model_override` | str \| None | no | Override configured LLM (e.g., `openai:gpt-4o`) |
 
@@ -196,7 +210,10 @@ The primary interface.
     { "kind": "run_completed", "sequence": 8, "model": "openai:gpt-4o-mini", "tokens_used": 1234 }
   ],
   "model": "openai:gpt-4o-mini",
-  "tokens_used": 1234
+  "tokens_used": 1234,
+  "verification_gap": null,
+  "clarification_request": null,
+  "provenance": []
 }
 ```
 
@@ -204,6 +221,12 @@ Each reasoning event is also emitted as an MCP `notifications/message` log
 message with logger `gofr-agent.reasoning`, so streaming-aware clients (e.g.
 the CLI tool) can display progress in real time without waiting for the final
 answer. The final `steps` array is derived from that same event stream.
+
+When prompt hardening response flags are enabled, factual verification failures
+are successful `ask` responses with `verification_gap` populated instead of
+fabricated answers. Material ambiguity can populate `clarification_request`.
+Tool-derived facts carry `provenance` records with `service`, `tool`,
+`args_hash`, optional `artifact_id`, and optional `as_of` freshness metadata.
 
 ### 5.2 `reset_session`
 
@@ -431,11 +454,23 @@ def make_tool(session: ClientSession, svc_name: str, mcp_tool: MCPTool) -> Tool:
 The system prompt is assembled from:
 - A fixed preamble describing the agent's role.
 - Per-service descriptors (name + description + tool list summary).
-- Optional caller-supplied `context` from the `ask` call.
+- Optional structured caller content from the `ask` call.
+
+When `GOFR_AGENT_PROMPT_HARDENING_V2_ENABLED=true`, the prompt uses the
+fact-grounded, intent-preserving, untrusted-data policy described in
+[docs/prompt_hardening_strategy.md](prompt_hardening_strategy.md). Service and
+tool descriptions are sanitized and rendered as quoted capability metadata.
+Legacy `context` is treated as pasted third-party data when structured caller
+content is enabled.
 
 ### 8.4 LLM provider
 
-Configured via `GOFR_AGENT_LLM_MODEL` (default: `openai:gpt-4o-mini`). pydantic-ai supports OpenAI, Anthropic, Gemini, Groq, Mistral, Ollama, and OpenAI-compatible endpoints (e.g. OpenRouter) out of the box. API key sourced from Vault (same pattern as gofr-iq) with env-var override `GOFR_AGENT_OPENROUTER_API_KEY`.
+Configured via `GOFR_AGENT_LLM_MODEL` (default: `openai:gpt-4o-mini`).
+pydantic-ai supports OpenAI, Anthropic, Gemini, Groq, Mistral, Ollama, and
+OpenAI-compatible endpoints such as OpenRouter. OpenRouter-compatible runs use
+`OPENROUTER_API_KEY` in the environment. The typed config also accepts
+`GOFR_AGENT_OPENROUTER_API_KEY` for callers that construct provider objects
+from `GofrAgentConfig`.
 
 ---
 
@@ -452,27 +487,56 @@ Follows the same JWT-based auth pattern as `gofr-plot` and `gofr-iq`:
 
 ## 10. Configuration Reference
 
+This table reflects `GofrAgentConfig.from_env()`. The current `app.main_mcp`
+entry point wires host, MCP port, services file, log level, pool size, and model
+through CLI/env arguments; tests, fixture chat, and direct config construction
+can exercise the full typed config.
+
 | Env Var | Default | Notes |
 |---|---|---|
 | `GOFR_AGENT_MCP_PORT` | `8090` | MCP Streamable HTTP port |
 | `GOFR_AGENT_MCPO_PORT` | `8091` | MCPO wrapper port |
-| `GOFR_AGENT_WEB_PORT` | `8092` | Reserved for future web UI |
 | `GOFR_AGENT_HOST` | `0.0.0.0` | Bind address |
 | `GOFR_AGENT_LLM_MODEL` | `openai:gpt-4o-mini` | pydantic-ai model string |
-| `GOFR_AGENT_OPENROUTER_API_KEY` | — | Override; otherwise read from Vault |
+| `GOFR_AGENT_OPENROUTER_API_KEY` | — | Optional typed-config value for OpenRouter provider setup |
 | `GOFR_AGENT_JWT_SECRET` | — | Required unless `--no-auth` |
-| `GOFR_AGENT_SERVICES` | — | Comma-separated service names (alt. to YAML) |
+| `GOFR_AGENT_SERVICES_FILE` | — | Path to the services YAML manifest |
+| `GOFR_AGENT_AGENT_TIMEOUT_SECONDS` | `120` | Outer wall-clock timeout for an `ask` run |
 | `GOFR_AGENT_MAX_STEPS` | `10` | Default reasoning step cap |
+| `GOFR_AGENT_MAX_STEPS_HARD_CAP` | `50` | Upper bound for caller-provided `max_steps` |
+| `GOFR_AGENT_MAX_QUESTION_CHARS` | `8000` | Question size bound |
+| `GOFR_AGENT_MAX_CONTEXT_CHARS` | `16000` | Legacy context size bound |
+| `GOFR_AGENT_MAX_EVENT_PAYLOAD_CHARS` | `4000` | Reasoning-event payload preview bound |
+| `GOFR_AGENT_MAX_RESPONSE_STEPS` | `200` | Final response step count bound |
+| `GOFR_AGENT_MAX_SESSIONS` | `1000` | Process-local session count bound |
+| `GOFR_AGENT_MAX_MESSAGES_PER_SESSION` | `100` | Recent raw message bound per session |
 | `GOFR_AGENT_SESSION_TTL_MINUTES` | `60` | Idle session expiry |
+| `GOFR_AGENT_SESSION_SWEEP_INTERVAL_SECONDS` | `60` | Session TTL sweep interval |
 | `GOFR_AGENT_TOOL_RESULT_MAX_CHARS` | `4000` | Truncation limit per tool result |
+| `GOFR_AGENT_TOOL_RETRY_ATTEMPTS` | `2` | Bounded retry attempts for schema/validation repairs |
 | `GOFR_AGENT_SESSION_POOL_SIZE` | `3` | MCP ClientSessions per downstream service |
+| `GOFR_AGENT_DYNAMIC_REGISTRATION_ENABLED` | `false` | Allows guarded runtime service registration |
+| `GOFR_AGENT_ALLOWED_SERVICE_HOSTS` | — | Comma-separated host allow-list for runtime registration |
+| `GOFR_AGENT_ALLOWED_MODELS` | — | Comma-separated allow-list for per-request model override |
+| `GOFR_AGENT_HUB_ENABLED` | `false` | Enables results hub registration and hub tools |
+| `GOFR_AGENT_HUB_URL` | — | Hub callback URL; must not use loopback names when hub is enabled |
+| `GOFR_AGENT_HUB_DEFAULT_TTL_SECONDS` | `3600` | Default result descriptor TTL |
+| `GOFR_AGENT_HUB_MAX_PAYLOAD_BYTES` | `524288` | Maximum stored hub payload size |
+| `GOFR_AGENT_HUB_MAX_RESULTS` | `256` | Maximum in-memory hub results |
+| `GOFR_AGENT_HUB_PROTOCOL_VERSION` | `1` | Results hub protocol version |
+| `GOFR_AGENT_PROMPT_HARDENING_V2_ENABLED` | `false` | Enables hardened system prompt assembly |
+| `GOFR_AGENT_CALLER_CONTENT_STRUCTURED_ENABLED` | `false` | Enables structured caller-content prompt assembly |
+| `GOFR_AGENT_INTENT_CONSTRAINTS_ENABLED` | `false` | Enforces forbidden/allowed service and tool constraints |
+| `GOFR_AGENT_GROUNDING_ENFORCEMENT_ENABLED` | `false` | Enables grounding checks before final answers |
+| `GOFR_AGENT_VERIFICATION_GAP_RESPONSE_ENABLED` | `false` | Returns structured verification gaps/clarifications |
+| `GOFR_AGENT_PROVENANCE_IN_RESPONSE_ENABLED` | `false` | Includes provenance records in `ask` responses |
 | `GOFR_AGENT_LOG_LEVEL` | `INFO` | DEBUG / INFO / WARNING / ERROR |
 
 ---
 
-## 11. Proposed File Structure
+## 11. Current File Structure
 
-Mirrors `gofr-plot` / `gofr-iq` layout:
+Implemented layout:
 
 ```
 gofr-agent/
@@ -507,7 +571,7 @@ gofr-agent/
 │   └── exceptions/
 ├── data/
 ├── docs/
-│   └── SPEC.md                    # this file
+│   └── master_specification.md    # this file
 ├── docker/
 ├── lib/
 │   └── gofr-common/               # git submodule
@@ -561,7 +625,7 @@ gofr-agent/
 | All pool slots busy for a service | Tool call awaits a free slot (async, does not block the event loop or other sessions) |
 | Downstream tool call fails during `ask` | Return error text to agent; agent may retry or report to user |
 | Tool result exceeds `TOOL_RESULT_MAX_CHARS` | Truncate and append notice; URL preserved if present |
-| LLM API key missing / invalid | Fatal startup error |
+| LLM API key missing / invalid | Provider call fails during `ask`; surface the provider error without exposing secrets |
 | `max_steps` reached | Return partial answer with notice |
 | Unknown `session_id` | Create new session, return new `session_id` |
 | Auth token invalid | Return MCP error (same as other gofr services) |
@@ -579,4 +643,4 @@ gofr-agent/
 | 5 | Web UI | **Out of scope for v1**; CLI tool only |
 | 6 | Conversation history | **Session-based** with `session_id`; in-memory with TTL; `reset_session` tool |
 | 7 | Tool namespacing | **`{service_name}__{tool_name}`** — tools scoped to the MCP server that offers them |
-| 8 | Port registration | **Register in gofr-common** — add `GOFR_AGENT` to `gofr_ports.env` and `ports.py` |
+| 8 | Port registration | **Registered in gofr-common** — `gofr-agent` maps to MCP 8090, MCPO 8091, and reserved web 8092 |

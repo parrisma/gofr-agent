@@ -1,5 +1,9 @@
 # Downstream Tool Contract Strategy
 
+Status: Resolved. Downstream JSON schemas are preserved, local validation and
+retry prompts are implemented, and descriptor-enabled large-result handoff is
+handled by the results hub path.
+
 ## Symptom
 
 The agent can call downstream tools with malformed argument payloads, including

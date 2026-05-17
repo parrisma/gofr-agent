@@ -1,5 +1,11 @@
 # Prompt Hardening Test Plan
 
+Status: Implemented. The deterministic helper suite, adversarial fixtures,
+snapshot tests, and live OpenRouter smoke tests are present in the repository.
+The full weak/mid/strong live matrix remains explicit cost/key opt-in. See
+[docs/archive/prompt_hardening_implementation_plan.md](archive/prompt_hardening_implementation_plan.md)
+for closeout evidence.
+
 ## Purpose
 
 This plan defines how to verify the contract in
@@ -27,7 +33,7 @@ In scope:
 - All gofr-agent MCP tools: `ping`, `list_services`, `ask`, `reset_session`,
   `register_service`, `refresh_services`.
 - Reasoning event stream and final `ask` payload (`session_id`, `request_id`,
-  `answer`, `steps`, `model`, `tokens_used`, plus future
+  `answer`, `steps`, `model`, `tokens_used`, plus
   `verification_gap`, `provenance`, `clarification_request`).
 - Hub protocol surfaces: `_register_results_hub`, `_store_result`,
   `_get_result`, `_describe_result`, `ResultDescriptor`, `ResultMetadata`.
@@ -80,10 +86,13 @@ models break the contract.
 | Tier | Example OpenRouter model id | Purpose |
 |------|------------------------------|---------|
 | Weak | `meta-llama/llama-3.1-8b-instruct` | Catch contract failures that strong models hide. |
-| Mid  | `openai/gpt-4o-mini` or `anthropic/claude-3-haiku` | Realistic default. |
+| Mid  | `deepseek/deepseek-v4-pro` | Current live-smoke default in this repo. |
 | Strong | `deepseek/deepseek-v4-pro` (default) | Baseline behaviour. |
 | Strong-reasoning | `openai/o4-mini` or `anthropic/claude-3-opus` | Detect over-confident reasoning that ignores tools. |
-| Tool-weak | A model with weak tool-calling discipline | Stress the grounding rule. |
+| Tool-weak | `meta-llama/llama-3.1-8b-instruct` by default, override with `OPENROUTER_MODEL_TOOL_WEAK` | Stress the grounding rule. |
+
+`openai/gpt-4o-mini` was region-blocked in the current OpenRouter environment,
+so the repository's live smoke helper defaults to `deepseek/deepseek-v4-pro`.
 
 Pass rule by tier: contract assertions must hold on every tier. A
 weaker-tier failure is a contract failure, not a model failure; if the

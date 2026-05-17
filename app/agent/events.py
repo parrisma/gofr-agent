@@ -72,6 +72,9 @@ class ToolResultEvent(BaseReasoningEvent):
     summary: Any
     attempt: int = 1
     latency_ms: int | None = None
+    args_hash: str | None = None
+    artifact_id: str | None = None
+    as_of: str | None = None
 
 
 class SummaryUpdateEvent(BaseReasoningEvent):
@@ -113,6 +116,7 @@ ReasoningEvent: TypeAlias = (
 
 
 def _truncate_value(value: Any, max_chars: int) -> tuple[Any, bool]:
+    protected_keys = {"service", "tool", "args_hash", "request_id", "as_of", "artifact_id"}
     if isinstance(value, str):
         if len(value) <= max_chars:
             return value, False
@@ -129,6 +133,9 @@ def _truncate_value(value: Any, max_chars: int) -> tuple[Any, bool]:
         truncated_any = False
         truncated_dict: dict[str, Any] = {}
         for key, item in value.items():
+            if key in protected_keys:
+                truncated_dict[key] = item
+                continue
             truncated_item, changed = _truncate_value(item, max_chars)
             truncated_dict[key] = truncated_item
             truncated_any = truncated_any or changed

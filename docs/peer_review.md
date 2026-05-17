@@ -1,5 +1,9 @@
 # gofr-agent — Senior Engineer Peer Review
 
+Status: Historical review snapshot. It remains useful for unresolved
+operational-hardening themes, but it predates the completed prompt-hardening
+and results-hub closeout captured in [docs/current_state.md](current_state.md).
+
 Reviewer perspective: senior software engineer + agentic-AI design SME.
 Scope: design and implementation of `gofr-agent` as of the current `main`
 working tree (base commit `8058a03`).
@@ -233,8 +237,8 @@ Source modules read end-to-end during the current pass:
   `app/auth/_dev_auth_service.py`
 - `app/cli/ask.py`, `app/exceptions/__init__.py`, `app/logger/__init__.py`
 - `pyproject.toml`, `services.yml.example`, `README.md`
-- `docs/SPEC.md`, `docs/reasoning_stream_spec.md`,
-  `docs/reasoning_stream_implementation_plan.md`
+- `docs/master_specification.md`, `docs/archive/reasoning_stream_spec.md`,
+  `docs/archive/reasoning_stream_implementation_plan.md`
 - `tests/integration/test_openrouter.py`, `tests/integration/conftest.py`,
   `tests/integration/mock_mcp_server.py`, `tests/code_quality/test_code_quality.py`
 

@@ -1,5 +1,9 @@
 # Analytics Bars Dependency Strategy
 
+Status: Resolved and superseded for descriptor-enabled workflows by the results
+hub handoff implementation. The strategy remains as historical context for the
+pre-hub `bars` argument failure mode.
+
 ## Symptom
 
 During fixture chat runs, the model calls analytics tools such as `simple_return`,
