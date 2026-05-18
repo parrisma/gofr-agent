@@ -41,10 +41,13 @@ def ask(
         "--token",
         help="Bearer token for authentication (or set GOFR_AGENT_TOKEN env var).",
     ),
-    max_steps: int = typer.Option(
-        10,
+    max_steps: int | None = typer.Option(
+        None,
         "--max-steps",
-        help="Maximum downstream tool-call iterations for this question.",
+        help=(
+            "Maximum downstream tool-call iterations for this question. "
+            "When omitted, the server default is used."
+        ),
     ),
     context: str | None = typer.Option(
         None,
@@ -154,7 +157,7 @@ async def _run(
     reset: str | None,
     url: str,
     token: str,
-    max_steps: int,
+    max_steps: int | None,
     context: str | None,
     instructions: str | None,
     asserted_facts: list[str] | None,
@@ -200,9 +203,10 @@ async def _run(
 
         params: dict[str, object] = {
             "question": question,
-            "max_steps": max_steps,
             "output_format": output_format,
         }
+        if max_steps is not None:
+            params["max_steps"] = max_steps
         if session_id is not None:
             params["session_id"] = session_id
         if context is not None:

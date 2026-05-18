@@ -21,7 +21,7 @@ import uvicorn
 from gofr_common.web import AuthHeaderMiddleware, create_cors_middleware
 
 from app.agent.agent import GofrAgent
-from app.auth import get_auth_service
+from app.auth import AuthService, get_auth_service
 from app.config import GofrAgentConfig
 from app.health import create_health_routes
 from app.logger import get_logger
@@ -32,6 +32,17 @@ from app.sessions.store import SessionStore
 from app.transport_security import apply_transport_security, build_mcp_cors_config
 
 logger = get_logger("gofr-agent.main")
+
+
+def create_configured_agent(
+    config: GofrAgentConfig,
+    registry: ServiceRegistry,
+    auth_service: AuthService,
+) -> GofrAgent:
+    """Build an agent using the same auth service as the MCP entrypoint."""
+    agent = GofrAgent(config, registry, auth_service)
+    agent.build()
+    return agent
 
 
 def create_agent_asgi_app(
@@ -129,8 +140,7 @@ async def _run_server(args: argparse.Namespace) -> None:
 
     auth_service = get_auth_service()
 
-    agent = GofrAgent(config, registry)
-    agent.build()
+    agent = create_configured_agent(config, registry, auth_service)
 
     session_store = SessionStore(
         ttl_minutes=config.session_ttl_minutes,

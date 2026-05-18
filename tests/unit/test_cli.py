@@ -201,6 +201,37 @@ class TestAskCli:
         assert result.exit_code == 0
         assert captured_params[0]["max_steps"] == 12
 
+    def test_ask_omits_max_steps_when_not_provided(self) -> None:
+        captured_params: list[dict] = []
+
+        from contextlib import asynccontextmanager
+
+        client = MagicMock()
+        client.initialize = AsyncMock()
+
+        async def fake_call_tool(tool: str, params: dict) -> MagicMock:  # type: ignore[type-arg]
+            captured_params.append(params)
+            return _make_call_result({"answer": "ok", "session_id": "s", "tokens_used": 1})
+
+        client.call_tool = fake_call_tool
+
+        @asynccontextmanager
+        async def _fake_session_cm(r, w, **kwargs):  # type: ignore[return]
+            yield client
+
+        @asynccontextmanager
+        async def _fake_transport_cm(url, **kwargs):  # type: ignore[return]
+            yield MagicMock(), MagicMock(), None
+
+        with (
+            patch("app.cli.ask.streamablehttp_client", _fake_transport_cm),
+            patch("app.cli.ask.ClientSession", _fake_session_cm),
+        ):
+            result = runner.invoke(app, [*_TOKEN_FLAGS, "Calc"])
+
+        assert result.exit_code == 0
+        assert "max_steps" not in captured_params[0]
+
     def test_ask_sends_structured_options(self) -> None:
         captured_params: list[dict] = []
 

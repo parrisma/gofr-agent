@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from copy import deepcopy
@@ -22,9 +23,12 @@ from app.agent.prompt_sanitizer import sanitize_metadata
 from app.auth.auth_service import AuthService
 from app.auth.permissions import downstream_activity, require_activity
 from app.exceptions import AuthorizationError, AuthTokenInvalidError, DownstreamToolError
+from app.logger import get_logger
+from app.request_context import request_log_fields
 from app.services.discovery import MCPToolInfo
 from app.services.pool import SessionPool
 
+logger = get_logger("gofr-agent.agent.tools")
 _URL_RE = re.compile(r"https?://\S+")
 _TOOL_DATA_START = "<<BEGIN_TOOL_DATA>>"
 _TOOL_DATA_END = "<<END_TOOL_DATA>>"
@@ -62,6 +66,18 @@ def _artifacts_from_deps(deps: AgentDeps | str) -> list[Any]:
     if isinstance(deps, AgentDeps):
         return deps.artifacts
     return []
+
+
+def _request_id_from_deps(deps: AgentDeps | str) -> str | None:
+    if isinstance(deps, AgentDeps):
+        return deps.request_id
+    return None
+
+
+def _auth_fingerprint(token: str) -> str:
+    if not token:
+        return "missing"
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
 def _record_tool_attempt(
@@ -304,6 +320,8 @@ def _classify_tool_error(
     service: str,
     tool: str,
     exc: Exception,
+    *,
+    required_activity: str | None = None,
 ) -> DownstreamToolError:
     if isinstance(exc, DownstreamToolError):
         return exc
@@ -318,7 +336,31 @@ def _classify_tool_error(
             recovery_hint="Retry may succeed once the downstream service recovers.",
         )
 
-    if isinstance(exc, (AuthorizationError, AuthTokenInvalidError, ValueError, TypeError)):
+    if isinstance(exc, AuthorizationError):
+        return DownstreamToolError(
+            service=service,
+            tool=tool,
+            message=str(exc),
+            transient=False,
+            fatal=False,
+            recovery_hint="Use a token with the required downstream MCP activity.",
+            code="downstream_auth_denied",
+            required_activity=exc.required_activity,
+        )
+
+    if isinstance(exc, AuthTokenInvalidError):
+        return DownstreamToolError(
+            service=service,
+            tool=tool,
+            message=str(exc),
+            transient=False,
+            fatal=False,
+            recovery_hint="Provide a valid bearer token for downstream MCP access.",
+            code="downstream_auth_invalid_token",
+            required_activity=required_activity,
+        )
+
+    if isinstance(exc, (ValueError, TypeError)):
         return DownstreamToolError(
             service=service,
             tool=tool,
@@ -467,12 +509,18 @@ def make_tool(
                     payload["as_of"] = as_of
                 return _wrap_tool_payload(payload)
             except Exception as exc:
-                error = _classify_tool_error(info.service_name, info.name, exc)
+                error = _classify_tool_error(
+                    info.service_name,
+                    info.name,
+                    exc,
+                    required_activity=activity,
+                )
                 if error.transient and attempt < attempts:
                     continue
                 if error.fatal:
                     raise error from exc
                 latency_ms = int((perf_counter() - started_at) * 1000)
+                outcome = error.code or "tool_error"
                 args_hash = _record_tool_attempt(
                     ctx.deps,
                     service=info.service_name,
@@ -482,8 +530,28 @@ def make_tool(
                     ok=False,
                     latency_ms=latency_ms,
                     truncated=False,
-                    outcome="tool_error",
+                    outcome=outcome,
                 )
+                if error.code in {
+                    "downstream_auth_denied",
+                    "downstream_auth_invalid_token",
+                }:
+                    log_fields = request_log_fields()
+                    request_id = _request_id_from_deps(ctx.deps)
+                    if request_id is not None and "request_id" not in log_fields:
+                        log_fields["request_id"] = request_id
+                    logger.warning(
+                        "Downstream tool authorisation rejected",
+                        service=info.service_name,
+                        tool=info.name,
+                        required_activity=error.required_activity or activity,
+                        outcome="denied",
+                        error_class=type(exc).__name__,
+                        auth_fingerprint=_auth_fingerprint(token),
+                        transient=error.transient,
+                        fatal=error.fatal,
+                        **log_fields,
+                    )
                 return _wrap_tool_payload(
                     {
                         "ok": False,

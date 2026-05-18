@@ -170,6 +170,59 @@ class TestGofrAgentRun:
         assert any(step["kind"] == "tool_retry" for step in result.steps)
         assert any(step["kind"] == "tool_result" for step in result.steps)
 
+    async def test_completed_log_counts_downstream_auth_denials(self) -> None:
+        config = _make_config()
+        reg = _make_registry()
+        ga = GofrAgent(config, reg)
+
+        tool_events = [
+            _FakeFunctionToolCallEvent("svc__lookup", {"query": "hello"}),
+            _FakeFunctionToolResultEvent(
+                "svc__lookup",
+                "<<BEGIN_TOOL_DATA>>\n"
+                '{"ok": false, "service": "svc", "tool": "lookup", '
+                '"attempt": 1, "truncated": false, "latency_ms": 2, '
+                '"error": {"code": "downstream_auth_denied", '
+                '"service": "svc", "tool": "lookup", '
+                '"message": "Not authorized for activity: MCPServerSvcToolLookup", '
+                '"transient": false, "fatal": false, '
+                '"recovery_hint": "Use a token with the required downstream MCP activity.", '
+                '"required_activity": "MCPServerSvcToolLookup"}}'
+                "\n<<END_TOOL_DATA>>",
+            ),
+        ]
+        fake_run = _FakeAgentRun(
+            nodes=[_FakeCallToolsNode(tool_events)],
+            result_output="Could not access the tool",
+            new_messages=[],
+            total_tokens=3,
+        )
+
+        with patch.multiple(
+            "app.agent.agent",
+            ModelRequestNode=_FakeModelRequestNode,
+            CallToolsNode=_FakeCallToolsNode,
+            FunctionToolCallEvent=_FakeFunctionToolCallEvent,
+            FunctionToolResultEvent=_FakeFunctionToolResultEvent,
+        ), patch("app.agent.agent.logger.info") as info_log:
+            ga._agent = MagicMock()
+            ga._agent.iter = _async_cm(fake_run)
+
+            store = SessionStore()
+            sess = await store.get_or_create(None)
+            await ga.run("hello", sess)
+
+        completed_calls = [
+            call for call in info_log.call_args_list if call.args[0] == "Agent run completed"
+        ]
+        assert completed_calls
+        fields = completed_calls[-1].kwargs
+        assert fields["tool_call_count"] == 1
+        assert fields["tool_result_count"] == 1
+        assert fields["tool_error_count"] == 1
+        assert fields["tool_auth_denial_count"] == 1
+        assert fields["run_outcome"] == "completed_all_tools_auth_denied"
+
     async def test_timeout_path_raises_timeout_error(self) -> None:
         config = _make_config(agent_timeout_seconds=0)
         reg = _make_registry()

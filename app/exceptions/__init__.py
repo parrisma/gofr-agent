@@ -83,6 +83,8 @@ class DownstreamToolError(GofrAgentError):
         transient: bool,
         fatal: bool,
         recovery_hint: str | None = None,
+        code: str | None = None,
+        required_activity: str | None = None,
     ) -> None:
         super().__init__(message)
         self.service = service
@@ -91,9 +93,11 @@ class DownstreamToolError(GofrAgentError):
         self.transient = transient
         self.fatal = fatal
         self.recovery_hint = recovery_hint
+        self.code = code
+        self.required_activity = required_activity
 
     def as_payload(self) -> dict[str, str | bool | None]:
-        return {
+        payload: dict[str, str | bool | None] = {
             "service": self.service,
             "tool": self.tool,
             "message": self.message,
@@ -101,3 +105,8 @@ class DownstreamToolError(GofrAgentError):
             "fatal": self.fatal,
             "recovery_hint": self.recovery_hint,
         }
+        if self.code is not None:
+            payload["code"] = self.code
+        if self.required_activity is not None:
+            payload["required_activity"] = self.required_activity
+        return payload

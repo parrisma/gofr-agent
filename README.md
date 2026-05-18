@@ -33,6 +33,8 @@ tools from its connected downstream services and returns a grounded answer.
 For the latest implementation status across reasoning events, results hub,
 prompt hardening, CLI behavior, fixture chat, validation evidence, and caveats,
 see [docs/current_state.md](docs/current_state.md).
+For the current auth, transport, downstream delegation, results-hub, and
+prompt-hardening posture, see [docs/security_model.md](docs/security_model.md).
 
 ---
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from mcp.types import TextContent
@@ -15,6 +15,7 @@ from pydantic_ai.exceptions import ModelRetry, SkipToolValidation
 from app.agent.contracts import IntentConstraints
 from app.agent.deps import AgentDeps
 from app.agent.tool_factory import make_tool, model_visible_tools, truncate_result
+from app.auth.permissions import downstream_activity
 from app.services.discovery import MCPToolInfo
 from app.services.pool import SessionPool
 from tests.helpers.dummy_auth_service import DummyAuthService
@@ -523,6 +524,31 @@ class TestMakeTool:
         assert payload["ok"] is False
         assert payload["error"]["transient"] is False
         assert payload["error"]["fatal"] is False
+        assert payload["error"]["code"] == "downstream_auth_denied"
+        assert payload["error"]["required_activity"] == downstream_activity("rag", "search")
+
+    async def test_downstream_activity_denied_logs_diagnostic(self) -> None:
+        """Downstream auth failures must be visible in server logs."""
+        pool = _make_pool_with_session(MagicMock())
+        info = _make_info(name="search", service_name="rag")
+        tool = make_tool(pool, info, DummyAuthService())
+        deps = AgentDeps(token="dev-read-token", request_id="req-auth-denied")
+
+        with patch("app.agent.tool_factory.logger.warning") as warning:
+            await tool.function(_ctx_with_deps(deps), query="hello")
+
+        warning.assert_called_once()
+        message = warning.call_args.args[0]
+        fields = warning.call_args.kwargs
+        assert message == "Downstream tool authorisation rejected"
+        assert fields["service"] == "rag"
+        assert fields["tool"] == "search"
+        assert fields["required_activity"] == downstream_activity("rag", "search")
+        assert fields["outcome"] == "denied"
+        assert fields["error_class"] == "AuthorizationError"
+        assert fields["request_id"] == "req-auth-denied"
+        assert fields["auth_fingerprint"] != "dev-read-token"
+        assert len(fields["auth_fingerprint"]) == 12
 
     async def test_downstream_activity_allowed_with_admin_token(self) -> None:
         content = TextContent(type="text", text="found it")

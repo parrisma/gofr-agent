@@ -66,6 +66,9 @@ from app.sessions.store import Session
 logger = get_logger("gofr-agent.agent")
 _TOOL_DATA_START = "<<BEGIN_TOOL_DATA>>\n"
 _TOOL_DATA_END = "\n<<END_TOOL_DATA>>"
+_DOWNSTREAM_AUTH_ERROR_CODES = frozenset(
+    {"downstream_auth_denied", "downstream_auth_invalid_token"}
+)
 
 
 def _exception_message(exc: Exception) -> str:
@@ -73,6 +76,33 @@ def _exception_message(exc: Exception) -> str:
     if message:
         return message
     return f"{type(exc).__name__} raised without a message"
+
+
+def _tool_run_summary(steps: list[dict[str, Any]]) -> dict[str, int | str]:
+    tool_call_count = sum(1 for step in steps if step.get("kind") == "tool_call")
+    tool_results = [step for step in steps if step.get("kind") == "tool_result"]
+    tool_error_count = sum(1 for step in tool_results if step.get("ok") is False)
+    tool_auth_denial_count = 0
+    for step in tool_results:
+        summary = step.get("summary")
+        if isinstance(summary, dict) and summary.get("code") in _DOWNSTREAM_AUTH_ERROR_CODES:
+            tool_auth_denial_count += 1
+
+    run_outcome = "completed"
+    if tool_results and tool_auth_denial_count == len(tool_results):
+        run_outcome = "completed_all_tools_auth_denied"
+    elif tool_auth_denial_count:
+        run_outcome = "completed_with_tool_auth_denials"
+    elif tool_error_count:
+        run_outcome = "completed_with_tool_errors"
+
+    return {
+        "tool_call_count": tool_call_count,
+        "tool_result_count": len(tool_results),
+        "tool_error_count": tool_error_count,
+        "tool_auth_denial_count": tool_auth_denial_count,
+        "run_outcome": run_outcome,
+    }
 
 
 @dataclass
@@ -622,12 +652,14 @@ class GofrAgent:
             )
         )
         steps = event_sink.build_steps()
+        tool_summary = _tool_run_summary(steps)
 
         logger.info(
             "Agent run completed",
             session_id=session.session_id,
             tokens_used=tokens,
             answer_chars=len(answer),
+            **tool_summary,
             **request_log_fields(),
         )
 
