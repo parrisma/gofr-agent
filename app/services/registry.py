@@ -144,6 +144,9 @@ class ServiceRegistry:
     def service_hub_capabilities(self, name: str) -> ServiceHubCapabilities:
         return self._hub_capabilities.get(name, ServiceHubCapabilities())
 
+    def service_tools(self, name: str) -> list[MCPToolInfo]:
+        return list(self._tools.get(name, []))
+
     def record_hub_capabilities(
         self,
         name: str,
@@ -311,10 +314,37 @@ class ServiceRegistry:
         self._tools[svc.name] = tools
         self._hub_capabilities[svc.name] = capabilities
         self._record_success(svc, pool)
+        hub_tool_advertised = REGISTER_RESULTS_HUB_TOOL in {tool.name for tool in tools}
+        hub_callback_configured = bool(svc.hub_callback_token or svc.hub_callback_token_env)
+        if hub_tool_advertised and not self._config.hub_enabled:
+            logger.warning(
+                "Service advertises results hub but agent hub is disabled",
+                service=svc.name,
+                hub_callback_configured=hub_callback_configured,
+                tool_count=len(tools),
+                **request_log_fields(),
+            )
+        if capabilities.registration_error is not None:
+            logger.warning(
+                "Service results hub registration degraded",
+                service=svc.name,
+                hub_tool_advertised=hub_tool_advertised,
+                hub_callback_configured=hub_callback_configured,
+                registration_error=capabilities.registration_error,
+                **request_log_fields(),
+            )
         logger.info(
             "Registered service",
             service=svc.name,
             tool_count=len(tools),
+            status=self.service_status(svc.name),
+            hub_tool_advertised=hub_tool_advertised,
+            hub_callback_configured=hub_callback_configured,
+            supports_results_hub=capabilities.supports_results_hub,
+            can_publish_results=capabilities.can_publish_results,
+            can_consume_results=capabilities.can_consume_results,
+            result_types=list(capabilities.result_types),
+            hub_registration_error=capabilities.registration_error,
             **request_log_fields(),
         )
         return tools

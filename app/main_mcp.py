@@ -24,6 +24,7 @@ from app.agent.agent import GofrAgent
 from app.auth import AuthService, get_auth_service
 from app.config import GofrAgentConfig
 from app.health import create_health_routes
+from app.hub.models import REGISTER_RESULTS_HUB_TOOL
 from app.logger import get_logger
 from app.mcp_server.mcp_server import create_mcp_server
 from app.services import ServicesManifest
@@ -43,6 +44,55 @@ def create_configured_agent(
     agent = GofrAgent(config, registry, auth_service)
     agent.build()
     return agent
+
+
+def build_startup_validation_summary(
+    config: GofrAgentConfig,
+    registry: ServiceRegistry,
+) -> dict[str, Any]:
+    service_count = 0
+    degraded_service_count = 0
+    failed_service_count = 0
+    services_with_hub_callback_token = 0
+    services_advertising_results_hub = 0
+    services_supporting_results_hub = 0
+    services_with_hub_registration_errors = 0
+
+    for service in registry.all_service_configs:
+        service_count += 1
+        status = registry.service_status(service.name)
+        if status == "degraded":
+            degraded_service_count += 1
+        elif status == "failed":
+            failed_service_count += 1
+
+        if service.hub_callback_token or service.hub_callback_token_env:
+            services_with_hub_callback_token += 1
+
+        tool_names = {tool.name for tool in registry.service_tools(service.name)}
+        if REGISTER_RESULTS_HUB_TOOL in tool_names:
+            services_advertising_results_hub += 1
+
+        capabilities = registry.service_hub_capabilities(service.name)
+        if capabilities.supports_results_hub:
+            services_supporting_results_hub += 1
+        if capabilities.registration_error is not None:
+            services_with_hub_registration_errors += 1
+
+    return {
+        "hub_enabled": config.hub_enabled,
+        "hub_url": config.hub_url or "<unset>",
+        "hub_bind_host": config.host,
+        "hub_bind_port": config.mcp_port,
+        "hub_url_configured": bool(config.hub_url),
+        "service_count": service_count,
+        "degraded_service_count": degraded_service_count,
+        "failed_service_count": failed_service_count,
+        "services_with_hub_callback_token": services_with_hub_callback_token,
+        "services_advertising_results_hub": services_advertising_results_hub,
+        "services_supporting_results_hub": services_supporting_results_hub,
+        "services_with_hub_registration_errors": services_with_hub_registration_errors,
+    }
 
 
 def create_agent_asgi_app(
@@ -137,6 +187,23 @@ async def _run_server(args: argparse.Namespace) -> None:
     # Bootstrap
     registry = ServiceRegistry(config)
     await registry.load_manifest(manifest)
+    startup_summary = build_startup_validation_summary(config, registry)
+    logger.info("Startup validation", **startup_summary)
+    if (
+        startup_summary["services_advertising_results_hub"]
+        and not startup_summary["hub_enabled"]
+    ):
+        logger.warning(
+            "Results hub startup validation degraded",
+            reason="hub_disabled",
+            **startup_summary,
+        )
+    elif startup_summary["services_with_hub_registration_errors"]:
+        logger.warning(
+            "Results hub startup validation degraded",
+            reason="hub_registration_errors",
+            **startup_summary,
+        )
 
     auth_service = get_auth_service()
 

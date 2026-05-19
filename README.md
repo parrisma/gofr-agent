@@ -123,13 +123,16 @@ OPENROUTER_API_KEY=sk-or-... \
   --services-file /home/gofr/devroot/gofr-agent/tmp/fixture-services.yml
 ```
 
-The helper starts the real MCP server on `http://gofr-agent-dev:8090/mcp` with
-dev auth enabled and UI-friendly Host/Origin/CORS defaults. For local UI MCP
-requests use the bearer token `dev-admin-token`.
+The helper binds the real MCP server to `0.0.0.0:8090`, enables the built-in
+results hub by default for this dev flow, and advertises
+`http://gofr-agent-dev:8090/mcp` unless you override it with `--hub-url`,
+`--hub-host`, `--hub-port`, or `--hub-disabled`. For local UI MCP requests use
+the bearer token `dev-admin-token`.
 
 - `./scripts/start-real-server.sh` starts the MCP server on port `8090`; it does not start the mcpo proxy on `8091`.
 - `--no-services` overrides `--services-file` and starts the server with zero downstream services.
 - If `tmp/fixture-services.yml` already exists, `./scripts/start-real-server.sh` will auto-select it when `--services-file` is omitted.
+- `./scripts/start-real-server.sh` now exposes explicit hub flags: `--hub-enabled`, `--hub-disabled`, `--hub-url`, `--hub-host`, and `--hub-port`.
 
 ---
 

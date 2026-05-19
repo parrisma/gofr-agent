@@ -543,9 +543,12 @@ class TestMakeTool:
         assert message == "Downstream tool authorisation rejected"
         assert fields["service"] == "rag"
         assert fields["tool"] == "search"
-        assert fields["required_activity"] == downstream_activity("rag", "search")
+        assert fields["required_activity_name"] == (
+            f"activity:{downstream_activity('rag', 'search')}"
+        )
         assert fields["outcome"] == "denied"
         assert fields["error_class"] == "AuthorizationError"
+        assert fields["error_code"] == "downstream_auth_denied"
         assert fields["request_id"] == "req-auth-denied"
         assert fields["auth_fingerprint"] != "dev-read-token"
         assert len(fields["auth_fingerprint"]) == 12
@@ -612,6 +615,7 @@ class TestMakeTool:
         payload = _unwrap_tool_payload(output)
         assert payload["ok"] is False
         assert payload["error"]["message"] == "bad arguments"
+        assert payload["error"]["code"] == "downstream_validation_error"
         assert session.call_tool.await_count == 1
 
     async def test_final_failed_tool_result_is_structured_and_ok_false(self) -> None:
@@ -631,6 +635,7 @@ class TestMakeTool:
         assert payload["args_hash"]
         assert payload["latency_ms"] >= 0
         assert payload["error"] == {
+            "code": "downstream_validation_error",
             "service": "svc",
             "tool": "lookup",
             "message": "bad arguments",
@@ -638,6 +643,38 @@ class TestMakeTool:
             "fatal": False,
             "recovery_hint": "Check tool arguments, token, and downstream permissions.",
         }
+
+    async def test_results_hub_errors_are_structured_and_logged(self) -> None:
+        session = MagicMock()
+        session.call_tool = AsyncMock(side_effect=ValueError("Results hub is not configured"))
+        pool = _make_pool_with_session(session)
+
+        tool = make_tool(
+            pool,
+            _make_info(service_name="analytics", name="max_drawdown"),
+            DummyAuthService(),
+        )
+        deps = AgentDeps(token="dev-admin-token", request_id="req-hub")
+
+        with patch("app.agent.tool_factory.logger.warning") as warning:
+            output = await tool.function(_ctx_with_deps(deps), ticker="MSFT")
+
+        payload = _unwrap_tool_payload(output)
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "results_hub_not_configured"
+        assert payload["error"]["recovery_hint"] == (
+            "Verify hub startup registration or pass inline values instead of descriptor refs."
+        )
+        warning.assert_called_once()
+        message = warning.call_args.args[0]
+        fields = warning.call_args.kwargs
+        assert message == "Downstream tool execution failed"
+        assert fields["service"] == "analytics"
+        assert fields["tool"] == "max_drawdown"
+        assert fields["outcome"] == "tool_error"
+        assert fields["error_code"] == "results_hub_not_configured"
+        assert fields["error_message"] == "Results hub is not configured"
+        assert fields["request_id"] == "req-hub"
 
     async def test_intent_block_prevents_downstream_session_open(self) -> None:
         session = MagicMock()

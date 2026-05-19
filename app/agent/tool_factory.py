@@ -80,6 +80,93 @@ def _auth_fingerprint(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
+def _value_error_details(message: str) -> tuple[str, str]:
+    cleaned = message.strip()
+    lowered = cleaned.lower()
+
+    if cleaned == "Results hub is not configured":
+        return (
+            "results_hub_not_configured",
+            "Verify hub startup registration or pass inline values instead of descriptor refs.",
+        )
+    if lowered.startswith("provide ") and "bars or bars_ref" in lowered:
+        return (
+            "downstream_missing_input",
+            "Pass inline values or a valid descriptor from the previous tool result.",
+        )
+    if "descriptor" in lowered:
+        return (
+            "invalid_result_descriptor",
+            "Pass a valid descriptor object returned by a previous tool result.",
+        )
+    if "hub" in lowered:
+        return (
+            "results_hub_resolution_failed",
+            "Inspect hub registration, callback auth, and descriptor flow.",
+        )
+    return (
+        "downstream_validation_error",
+        "Check tool arguments, token, and downstream permissions.",
+    )
+
+
+def _log_tool_failure(
+    *,
+    deps: AgentDeps | str,
+    service: str,
+    tool: str,
+    token: str,
+    error: DownstreamToolError,
+    exc: Exception,
+    attempt: int,
+    latency_ms: int,
+    args_hash: str | None,
+    required_activity: str,
+) -> None:
+    log_fields = request_log_fields()
+    request_id = _request_id_from_deps(deps)
+    if request_id is not None and "request_id" not in log_fields:
+        log_fields["request_id"] = request_id
+
+    common_fields = {
+        "service": service,
+        "tool": tool,
+        "attempt": attempt,
+        "latency_ms": latency_ms,
+        "args_hash": args_hash,
+        "error_class": type(exc).__name__,
+        "error_code": error.code or "downstream_tool_error",
+        "error_message": error.message,
+        "transient": error.transient,
+        "fatal": error.fatal,
+        **log_fields,
+    }
+
+    if error.code in {"downstream_auth_denied", "downstream_auth_invalid_token"}:
+        logger.warning(
+            "Downstream tool authorisation rejected",
+            outcome="denied",
+            required_activity_name=f"activity:{error.required_activity or required_activity}",
+            auth_fingerprint=_auth_fingerprint(token),
+            **common_fields,
+        )
+        return
+
+    if error.fatal:
+        logger.error(
+            "Downstream tool execution failed",
+            outcome="fatal",
+            **common_fields,
+        )
+        return
+
+    logger.warning(
+        "Downstream tool execution failed",
+        outcome="tool_error",
+        **common_fields,
+    )
+
+
 def _record_tool_attempt(
     deps: AgentDeps | str,
     *,
@@ -334,6 +421,7 @@ def _classify_tool_error(
             transient=True,
             fatal=False,
             recovery_hint="Retry may succeed once the downstream service recovers.",
+            code="downstream_timeout",
         )
 
     if isinstance(exc, AuthorizationError):
@@ -361,13 +449,15 @@ def _classify_tool_error(
         )
 
     if isinstance(exc, (ValueError, TypeError)):
+        code, recovery_hint = _value_error_details(str(exc))
         return DownstreamToolError(
             service=service,
             tool=tool,
             message=str(exc),
             transient=False,
             fatal=False,
-            recovery_hint="Check tool arguments, token, and downstream permissions.",
+            recovery_hint=recovery_hint,
+            code=code,
         )
 
     return DownstreamToolError(
@@ -377,6 +467,7 @@ def _classify_tool_error(
         transient=False,
         fatal=True,
         recovery_hint="Inspect the downstream service and server logs.",
+        code="downstream_fatal_error",
     )
 
 
@@ -532,26 +623,18 @@ def make_tool(
                     truncated=False,
                     outcome=outcome,
                 )
-                if error.code in {
-                    "downstream_auth_denied",
-                    "downstream_auth_invalid_token",
-                }:
-                    log_fields = request_log_fields()
-                    request_id = _request_id_from_deps(ctx.deps)
-                    if request_id is not None and "request_id" not in log_fields:
-                        log_fields["request_id"] = request_id
-                    logger.warning(
-                        "Downstream tool authorisation rejected",
-                        service=info.service_name,
-                        tool=info.name,
-                        required_activity=error.required_activity or activity,
-                        outcome="denied",
-                        error_class=type(exc).__name__,
-                        auth_fingerprint=_auth_fingerprint(token),
-                        transient=error.transient,
-                        fatal=error.fatal,
-                        **log_fields,
-                    )
+                _log_tool_failure(
+                    deps=ctx.deps,
+                    service=info.service_name,
+                    tool=info.name,
+                    token=token,
+                    error=error,
+                    exc=exc,
+                    attempt=attempt,
+                    latency_ms=latency_ms,
+                    args_hash=args_hash,
+                    required_activity=activity,
+                )
                 return _wrap_tool_payload(
                     {
                         "ok": False,

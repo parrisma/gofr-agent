@@ -11,6 +11,8 @@ DEFAULT_LLM_MODEL="openai:deepseek/deepseek-v4-pro"
 DEFAULT_AGENT_TIMEOUT_SECONDS="240"
 DEFAULT_MAX_STEPS="50"
 DEFAULT_MAX_STEPS_HARD_CAP="100"
+DEFAULT_HUB_ENABLED="true"
+DEFAULT_HUB_HOST="gofr-agent-dev"
 
 HOST="${GOFR_AGENT_HOST:-0.0.0.0}"
 PORT="${GOFR_AGENT_MCP_PORT:-8090}"
@@ -21,9 +23,34 @@ OPENROUTER_API_KEY_VALUE="${OPENROUTER_API_KEY:-}"
 AGENT_TIMEOUT_SECONDS="${GOFR_AGENT_AGENT_TIMEOUT_SECONDS:-${DEFAULT_AGENT_TIMEOUT_SECONDS}}"
 MAX_STEPS="${GOFR_AGENT_MAX_STEPS:-${DEFAULT_MAX_STEPS}}"
 MAX_STEPS_HARD_CAP="${GOFR_AGENT_MAX_STEPS_HARD_CAP:-${DEFAULT_MAX_STEPS_HARD_CAP}}"
+HUB_ENABLED_RAW="${GOFR_AGENT_HUB_ENABLED:-${DEFAULT_HUB_ENABLED}}"
+HUB_HOST="${GOFR_AGENT_HUB_HOST:-${DEFAULT_HUB_HOST}}"
+HUB_PORT="${GOFR_AGENT_HUB_PORT:-}"
+HUB_URL="${GOFR_AGENT_HUB_URL:-}"
 
 DEFAULT_ALLOWED_HOSTS="gofr-agent-dev,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,127.0.0.1:*,localhost:*,[::1]:*"
 DEFAULT_ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000"
+
+normalize_bool() {
+    local value
+    value="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+    case "${value}" in
+        1|true|yes|on)
+            printf 'true'
+            ;;
+        0|false|no|off)
+            printf 'false'
+            ;;
+        *)
+            echo "Invalid boolean value: ${1}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+build_hub_url() {
+    printf 'http://%s:%s/mcp' "$1" "$2"
+}
 
 usage() {
     cat <<EOF
@@ -46,6 +73,11 @@ Options:
   --agent-timeout-seconds    SECONDS Wall-clock timeout for a single agent run (default: ${AGENT_TIMEOUT_SECONDS})
   --max-steps COUNT          Default tool-call limit when callers omit max_steps (default: ${MAX_STEPS})
   --max-steps-hard-cap COUNT Upper bound for caller-provided max_steps (default: ${MAX_STEPS_HARD_CAP})
+    --hub-enabled              Enable the built-in results hub (default: ${HUB_ENABLED_RAW})
+    --hub-disabled             Disable the built-in results hub
+    --hub-url URL              Public MCP URL advertised for hub callbacks
+    --hub-host HOST            Host used to build the default hub URL (default: ${HUB_HOST})
+    --hub-port PORT            Port used to build the default hub URL (default: ${HUB_PORT:-${PORT}})
   -h, --help                 Show this help
 
 Manifest selection order when --services-file is omitted:
@@ -59,6 +91,8 @@ Environment defaults applied when not already set:
     GOFR_AGENT_AGENT_TIMEOUT_SECONDS=${DEFAULT_AGENT_TIMEOUT_SECONDS}
     GOFR_AGENT_MAX_STEPS=${DEFAULT_MAX_STEPS}
     GOFR_AGENT_MAX_STEPS_HARD_CAP=${DEFAULT_MAX_STEPS_HARD_CAP}
+    GOFR_AGENT_HUB_ENABLED=${DEFAULT_HUB_ENABLED}
+    GOFR_AGENT_HUB_URL=$(build_hub_url "${DEFAULT_HUB_HOST}" "${PORT}")
   GOFR_AGENT_MCP_ALLOWED_HOSTS=${DEFAULT_ALLOWED_HOSTS}
   GOFR_AGENT_MCP_ALLOWED_ORIGINS=${DEFAULT_ALLOWED_ORIGINS}
   GOFR_AGENT_CORS_ORIGINS=${DEFAULT_ALLOWED_ORIGINS}
@@ -152,6 +186,38 @@ while [[ $# -gt 0 ]]; do
             MAX_STEPS_HARD_CAP="${1#*=}"
             shift
             ;;
+        --hub-enabled)
+            HUB_ENABLED_RAW="true"
+            shift
+            ;;
+        --hub-disabled|--no-hub)
+            HUB_ENABLED_RAW="false"
+            shift
+            ;;
+        --hub-url)
+            HUB_URL="$2"
+            shift 2
+            ;;
+        --hub-url=*)
+            HUB_URL="${1#*=}"
+            shift
+            ;;
+        --hub-host)
+            HUB_HOST="$2"
+            shift 2
+            ;;
+        --hub-host=*)
+            HUB_HOST="${1#*=}"
+            shift
+            ;;
+        --hub-port)
+            HUB_PORT="$2"
+            shift 2
+            ;;
+        --hub-port=*)
+            HUB_PORT="${1#*=}"
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -174,11 +240,25 @@ elif [[ -z "${SERVICES_FILE}" ]]; then
     fi
 fi
 
+HUB_ENABLED="$(normalize_bool "${HUB_ENABLED_RAW}")"
+if [[ -z "${HUB_PORT}" ]]; then
+    HUB_PORT="${PORT}"
+fi
+if [[ "${HUB_ENABLED}" == "true" && -z "${HUB_URL}" ]]; then
+    HUB_URL="$(build_hub_url "${HUB_HOST}" "${HUB_PORT}")"
+fi
+
 export GOFR_AGENT_AUTH_MODE="${GOFR_AGENT_AUTH_MODE:-dev}"
 export GOFR_AGENT_LLM_MODEL="${MODEL}"
 export GOFR_AGENT_AGENT_TIMEOUT_SECONDS="${AGENT_TIMEOUT_SECONDS}"
 export GOFR_AGENT_MAX_STEPS="${MAX_STEPS}"
 export GOFR_AGENT_MAX_STEPS_HARD_CAP="${MAX_STEPS_HARD_CAP}"
+export GOFR_AGENT_HUB_ENABLED="${HUB_ENABLED}"
+if [[ -n "${HUB_URL}" ]]; then
+    export GOFR_AGENT_HUB_URL="${HUB_URL}"
+else
+    unset GOFR_AGENT_HUB_URL
+fi
 export GOFR_AGENT_MCP_ALLOWED_HOSTS="${GOFR_AGENT_MCP_ALLOWED_HOSTS:-${DEFAULT_ALLOWED_HOSTS}}"
 export GOFR_AGENT_MCP_ALLOWED_ORIGINS="${GOFR_AGENT_MCP_ALLOWED_ORIGINS:-${DEFAULT_ALLOWED_ORIGINS}}"
 export GOFR_AGENT_CORS_ORIGINS="${GOFR_AGENT_CORS_ORIGINS:-${DEFAULT_ALLOWED_ORIGINS}}"
@@ -228,6 +308,10 @@ echo "OpenRouter key:   $( [[ -n "${OPENROUTER_API_KEY:-}" ]] && echo configured
 echo "OpenAI base URL:  ${OPENAI_BASE_URL:-<default>}"
 echo "Services file:    ${SERVICES_FILE:-<none>}"
 echo "Auth mode:        ${GOFR_AGENT_AUTH_MODE}"
+echo "Hub enabled:      ${HUB_ENABLED}"
+echo "Hub host:         ${HUB_HOST}"
+echo "Hub port:         ${HUB_PORT}"
+echo "Hub URL:          ${HUB_URL:-<unset>}"
 echo "Agent timeout:    ${GOFR_AGENT_AGENT_TIMEOUT_SECONDS}"
 echo "Max steps:        ${GOFR_AGENT_MAX_STEPS}"
 echo "Max steps cap:    ${GOFR_AGENT_MAX_STEPS_HARD_CAP}"

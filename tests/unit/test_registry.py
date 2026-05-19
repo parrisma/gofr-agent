@@ -11,7 +11,7 @@ from app.exceptions import ServiceRegistrationPolicyError
 from app.services import ServiceConfig, ServicesManifest
 from app.services.discovery import MCPToolInfo
 from app.services.pool import SessionPool
-from app.services.registry import ServiceRegistry
+from app.services.registry import ServiceHubCapabilities, ServiceRegistry
 
 
 def _make_config(**kwargs) -> GofrAgentConfig:  # type: ignore[no-untyped-def]
@@ -204,6 +204,123 @@ class TestRegisterService:
 
         assert registry.service_status("mock") == "failed"
         assert registry.service_error("mock") == "probe failed"
+
+    async def test_successful_registration_logs_hub_capabilities(self, monkeypatch) -> None:
+        registry = ServiceRegistry(
+            _make_config(
+                dynamic_registration_enabled=True,
+                allowed_service_hosts=["*"],
+                hub_enabled=True,
+                hub_url="http://gofr-agent:8090/mcp",
+            )
+        )
+        svc = ServiceConfig(
+            name="analytics",
+            url="http://analytics/mcp",
+            hub_callback_token="dev-fixtures-hub-token",
+        )
+        pool = MagicMock(spec=SessionPool)
+        pool.start = AsyncMock()
+        pool.stop = AsyncMock()
+        pool.is_healthy = True
+
+        monkeypatch.setattr("app.services.registry.SessionPool", MagicMock(return_value=pool))
+        monkeypatch.setattr(
+            "app.services.registry.discover_tools",
+            AsyncMock(
+                return_value=[
+                    MCPToolInfo(
+                        name="_register_results_hub",
+                        description="",
+                        input_schema={},
+                        service_name="analytics",
+                    ),
+                    MCPToolInfo(
+                        name="simple_return",
+                        description="",
+                        input_schema={},
+                        service_name="analytics",
+                    ),
+                ]
+            ),
+        )
+        monkeypatch.setattr(
+            registry,
+            "_register_results_hub",
+            AsyncMock(
+                return_value=ServiceHubCapabilities(
+                    supports_results_hub=True,
+                    can_publish_results=True,
+                    can_consume_results=True,
+                    result_types=("ohlcv_bars",),
+                )
+            ),
+        )
+
+        with pytest.MonkeyPatch.context() as _:
+            pass
+
+        info_log = MagicMock()
+        monkeypatch.setattr("app.services.registry.logger.info", info_log)
+
+        await registry.register_service(svc)
+
+        registered_calls = [
+            call for call in info_log.call_args_list if call.args[0] == "Registered service"
+        ]
+        assert registered_calls
+        fields = registered_calls[-1].kwargs
+        assert fields["service"] == "analytics"
+        assert fields["hub_tool_advertised"] is True
+        assert fields["hub_callback_configured"] is True
+        assert fields["supports_results_hub"] is True
+        assert fields["can_publish_results"] is True
+        assert fields["can_consume_results"] is True
+        assert fields["result_types"] == ["ohlcv_bars"]
+
+    async def test_hub_tool_warning_when_agent_hub_disabled(self, monkeypatch) -> None:
+        registry = ServiceRegistry(
+            _make_config(dynamic_registration_enabled=True, allowed_service_hosts=["*"])
+        )
+        svc = ServiceConfig(
+            name="analytics",
+            url="http://analytics/mcp",
+            hub_callback_token="dev-fixtures-hub-token",
+        )
+        pool = MagicMock(spec=SessionPool)
+        pool.start = AsyncMock()
+        pool.stop = AsyncMock()
+        pool.is_healthy = True
+
+        monkeypatch.setattr("app.services.registry.SessionPool", MagicMock(return_value=pool))
+        monkeypatch.setattr(
+            "app.services.registry.discover_tools",
+            AsyncMock(
+                return_value=[
+                    MCPToolInfo(
+                        name="_register_results_hub",
+                        description="",
+                        input_schema={},
+                        service_name="analytics",
+                    ),
+                ]
+            ),
+        )
+
+        warning_log = MagicMock()
+        monkeypatch.setattr("app.services.registry.logger.warning", warning_log)
+
+        await registry.register_service(svc)
+
+        warning_calls = [
+            call
+            for call in warning_log.call_args_list
+            if call.args[0] == "Service advertises results hub but agent hub is disabled"
+        ]
+        assert warning_calls
+        fields = warning_calls[-1].kwargs
+        assert fields["service"] == "analytics"
+        assert fields["hub_callback_configured"] is True
 
 
 class TestAllTools:
