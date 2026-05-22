@@ -8,6 +8,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from tests.fixtures.mcp_services._data_loader import csv_rows
 from tests.integration.conftest import AUTH_HEADERS
 
 pytestmark = pytest.mark.asyncio
@@ -98,7 +99,7 @@ async def test_get_trades_date_filter(trades_url: str) -> None:
 async def test_get_trades_no_filter_returns_all(trades_url: str) -> None:
     result = await _call_json(trades_url, "get_trades", {})
     assert isinstance(result, list)
-    assert len(result) == 20
+    assert len(result) == len(csv_rows("trades.csv"))
 
 
 # ---------------------------------------------------------------------------

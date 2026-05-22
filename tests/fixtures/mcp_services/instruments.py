@@ -47,6 +47,17 @@ _RESULTS_HUB = ResultsHubState()
 def configure_results_hub_auth(callback_token: str | None) -> None:
     _configure_results_hub_auth(_RESULTS_HUB, callback_token)
 
+
+def _instrument_record(row: dict[str, str]) -> dict[str, str]:
+    return {
+        "ticker": row["ticker"],
+        "instrument_type": row["instrument_type"],
+        "isin": row["isin"],
+        "name": row["name"],
+        "exchange": row["exchange"],
+        "currency": row["currency"],
+    }
+
 # ---------------------------------------------------------------------------
 # FastMCP instance
 # ---------------------------------------------------------------------------
@@ -72,13 +83,7 @@ def instrument_lookup(query: str) -> dict | None:
             or q in row["isin"].lower()
             or q in row["name"].lower()
         ):
-            return {
-                "ticker": row["ticker"],
-                "isin": row["isin"],
-                "name": row["name"],
-                "exchange": row["exchange"],
-                "currency": row["currency"],
-            }
+            return _instrument_record(row)
     return None
 
 
@@ -132,16 +137,7 @@ def list_instruments(exchange: str | None = None) -> list[dict]:
     rows = list(_INSTRUMENTS.values())
     if exchange is not None:
         rows = [r for r in rows if r["exchange"] == exchange.upper()]
-    return [
-        {
-            "ticker": r["ticker"],
-            "isin": r["isin"],
-            "name": r["name"],
-            "exchange": r["exchange"],
-            "currency": r["currency"],
-        }
-        for r in rows
-    ]
+    return [_instrument_record(row) for row in rows]
 
 
 @mcp.tool()

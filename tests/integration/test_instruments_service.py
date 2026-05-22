@@ -70,6 +70,7 @@ async def test_instrument_lookup_no_token_raises(instruments_url: str) -> None:
 async def test_instrument_lookup_by_ticker(instruments_url: str) -> None:
     result = await _call_json(instruments_url, "instrument_lookup", {"query": "AAPL"})
     assert result is not None
+    assert result["instrument_type"] == "EQUITY"
     assert result["isin"] == "US0378331005"
     assert result["exchange"] == "XNAS"
 
@@ -140,7 +141,19 @@ async def test_get_price_on_date_unknown_date_returns_none(instruments_url: str)
 async def test_list_instruments_all(instruments_url: str) -> None:
     result = await _call_json(instruments_url, "list_instruments", {})
     assert isinstance(result, list)
-    assert len(result) == 6
+    assert len(result) == 44
+    type_counts = {
+        instrument_type: sum(1 for row in result if row["instrument_type"] == instrument_type)
+        for instrument_type in {row["instrument_type"] for row in result}
+    }
+    assert type_counts == {
+        "EQUITY": 16,
+        "FX": 6,
+        "ETF": 5,
+        "STABLE_COIN": 6,
+        "CASH": 6,
+        "BOND": 5,
+    }
 
 
 async def test_list_instruments_by_exchange(instruments_url: str) -> None:
@@ -153,7 +166,7 @@ async def test_list_instruments_by_exchange(instruments_url: str) -> None:
 async def test_list_instruments_no_exchange_returns_all(instruments_url: str) -> None:
     result = await _call_json(instruments_url, "list_instruments", {"exchange": None})
     assert isinstance(result, list)
-    assert len(result) == 6
+    assert len(result) == 44
 
 
 # ---------------------------------------------------------------------------

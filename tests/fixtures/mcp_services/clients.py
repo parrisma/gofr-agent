@@ -19,22 +19,15 @@ from tests.fixtures.mcp_services._server import _require_bearer
 
 _CLIENTS: dict[str, dict] = csv_table("clients.csv", "client_id")
 _MANDATES: dict[str, dict] = csv_table("mandates.csv", "client_id")
+_TRADES_RAW = csv_rows("trades.csv")
 
-_HOLDINGS_RAW = csv_rows("holdings.csv")
 _WATCHLIST_RAW = csv_rows("watchlist.csv")
-
-_HOLDINGS: dict[str, list[dict]] = defaultdict(list)
-for _row in _HOLDINGS_RAW:
-    _HOLDINGS[_row["client_id"]].append(_row)
 
 _WATCHLIST: dict[str, list[str]] = defaultdict(list)
 for _row in _WATCHLIST_RAW:
     _WATCHLIST[_row["client_id"]].append(_row["ticker"])
 
-_TICKER_TO_HOLDERS: dict[str, list[str]] = defaultdict(list)
 _TICKER_TO_WATCHERS: dict[str, list[str]] = defaultdict(list)
-for _row in _HOLDINGS_RAW:
-    _TICKER_TO_HOLDERS[_row["ticker"]].append(_row["client_id"])
 for _row in _WATCHLIST_RAW:
     _TICKER_TO_WATCHERS[_row["ticker"]].append(_row["client_id"])
 
@@ -43,6 +36,56 @@ for _row in _WATCHLIST_RAW:
 # ---------------------------------------------------------------------------
 
 mcp = FastMCP("clients-test-service")
+
+
+def _client_record(row: dict[str, str]) -> dict[str, str]:
+    return {
+        "client_id": row["client_id"],
+        "name": row["name"],
+    }
+
+
+def _position_quantities() -> dict[tuple[str, str], int]:
+    positions: dict[tuple[str, str], int] = defaultdict(int)
+    for row in _TRADES_RAW:
+        quantity = int(row["quantity"])
+        if row["side"] == "sell":
+            quantity *= -1
+        positions[(row["client_id"], row["ticker"])] += quantity
+    return positions
+
+
+def _holdings_for_client(client_id: str) -> list[dict[str, int | str]]:
+    holdings: list[dict[str, int | str]] = []
+    for (current_client_id, ticker), quantity in sorted(_position_quantities().items()):
+        if current_client_id != client_id or quantity == 0:
+            continue
+        holdings.append({
+            "client_id": client_id,
+            "ticker": ticker,
+            "quantity": quantity,
+        })
+    return holdings
+
+
+def _holding_for_client_ticker(client_id: str, ticker: str) -> dict[str, int | str] | None:
+    quantity = _position_quantities().get((client_id, ticker.upper()), 0)
+    if quantity == 0:
+        return None
+    return {
+        "client_id": client_id,
+        "ticker": ticker.upper(),
+        "quantity": quantity,
+    }
+
+
+def _clients_holding_ticker(ticker: str) -> list[str]:
+    holders = [
+        client_id
+        for (client_id, current_ticker), quantity in _position_quantities().items()
+        if current_ticker == ticker.upper() and quantity != 0
+    ]
+    return sorted(holders)
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -60,12 +103,12 @@ def client_lookup(query: str) -> dict | None:
     # Exact client_id match
     if query.upper() in _CLIENTS:
         row = _CLIENTS[query.upper()]
-        return {"client_id": row["client_id"], "name": row["name"]}
+        return _client_record(row)
     # Case-insensitive name substring
     q = query.lower()
     for row in _CLIENTS.values():
         if q in row["name"].lower():
-            return {"client_id": row["client_id"], "name": row["name"]}
+            return _client_record(row)
     return None
 
 
@@ -73,7 +116,7 @@ def client_lookup(query: str) -> dict | None:
 def list_clients() -> list[dict]:
     """Return all client records."""
     _require_bearer()
-    return [{"client_id": r["client_id"], "name": r["name"]} for r in _CLIENTS.values()]
+    return [_client_record(row) for row in _CLIENTS.values()]
 
 
 @mcp.tool()
@@ -83,10 +126,7 @@ def get_holdings(client_id: str) -> list[dict]:
     Returns an empty list for unknown client IDs.
     """
     _require_bearer()
-    return [
-        {"client_id": r["client_id"], "ticker": r["ticker"], "quantity": int(r["quantity"])}
-        for r in _HOLDINGS.get(client_id, [])
-    ]
+    return _holdings_for_client(client_id)
 
 
 @mcp.tool()
@@ -96,21 +136,14 @@ def get_holding(client_id: str, ticker: str) -> dict | None:
     Returns None if the client has no current position in the ticker.
     """
     _require_bearer()
-    for row in _HOLDINGS.get(client_id, []):
-        if row["ticker"] == ticker.upper():
-            return {
-                "client_id": client_id,
-                "ticker": row["ticker"],
-                "quantity": int(row["quantity"]),
-            }
-    return None
+    return _holding_for_client_ticker(client_id, ticker)
 
 
 @mcp.tool()
 def list_portfolio_tickers(client_id: str) -> list[str]:
     """Return distinct tickers currently held by a client."""
     _require_bearer()
-    return sorted({r["ticker"] for r in _HOLDINGS.get(client_id, [])})
+    return [holding["ticker"] for holding in _holdings_for_client(client_id)]
 
 
 @mcp.tool()
@@ -143,6 +176,7 @@ def get_mandate_document(client_id: str) -> dict | None:
         return None
     return {
         "client_id": row["client_id"],
+        "fund_mandate": row["fund_mandate"],
         "mandate_version": row["mandate_version"],
         "effective_date": row["effective_date"],
         "mandate_text": row["mandate_text"],
@@ -184,6 +218,7 @@ def list_mandate_documents() -> list[dict]:
     return [
         {
             "client_id": r["client_id"],
+            "fund_mandate": r["fund_mandate"],
             "mandate_version": r["mandate_version"],
             "effective_date": r["effective_date"],
         }
@@ -195,7 +230,7 @@ def list_mandate_documents() -> list[dict]:
 def get_clients_holding(ticker: str) -> list[str]:
     """Return all client IDs that hold a given ticker (long or short)."""
     _require_bearer()
-    return list(_TICKER_TO_HOLDERS.get(ticker.upper(), []))
+    return _clients_holding_ticker(ticker)
 
 
 @mcp.tool()
