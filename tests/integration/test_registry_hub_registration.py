@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+import httpx
+from gofr_common.web import get_request_headers_from_context
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 from mcp.server.fastmcp import FastMCP
 
 from app.config import GofrAgentConfig
 from app.services import ServiceConfig, ServicesManifest
 from app.services.registry import ServiceRegistry
 from tests.fixtures.mcp_services._server import _require_bearer, make_service_server
+
+_HUB_URL_HEADER = "X-GOFR-HUB-URL"
+_HUB_CALLBACK_TOKEN_HEADER = "X-GOFR-HUB-CALLBACK-TOKEN"
 
 
 def _config() -> GofrAgentConfig:
@@ -109,7 +117,63 @@ async def _shutdown_registry(registry: ServiceRegistry, thread: object) -> None:
     thread.join(timeout=5)
 
 
+async def _call_tool(
+    url: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    headers: dict[str, str],
+) -> tuple[bool, str]:
+    async with (
+        httpx.AsyncClient(headers=headers) as http_client,
+        streamable_http_client(url, http_client=http_client) as (read, write, _),
+        ClientSession(read, write) as client,
+    ):
+        await client.initialize()
+        result = await client.call_tool(tool_name, arguments)
+    raw = result.content[0].text if result.content else ""
+    return bool(result.isError), raw
+
+
+class _HeaderEchoFixture:
+    def __init__(self) -> None:
+        self.mcp = FastMCP("header-echo-fixture")
+
+        @self.mcp.tool()
+        def echo_hub_headers() -> dict[str, str | None]:
+            headers = get_request_headers_from_context()
+            return {
+                "hub_url": headers.get(_HUB_URL_HEADER.lower()),
+                "hub_callback_token": headers.get(_HUB_CALLBACK_TOKEN_HEADER.lower()),
+            }
+
+
 class TestRegistryHubRegistration:
+    async def test_fixture_tools_can_read_per_call_hub_headers(self) -> None:
+        fixture = _HeaderEchoFixture()
+        host, port, thread = make_service_server(fixture.mcp)
+
+        try:
+            is_error, raw = await _call_tool(
+                f"http://{host}:{port}/mcp",
+                "echo_hub_headers",
+                {},
+                headers={
+                    "Authorization": "Bearer fixture-service-token",
+                    _HUB_URL_HEADER: "http://gofr-agent:8090/mcp",
+                    _HUB_CALLBACK_TOKEN_HEADER: "signed-session-token",
+                },
+            )
+
+            assert is_error is False, raw
+            assert json.loads(raw) == {
+                "hub_url": "http://gofr-agent:8090/mcp",
+                "hub_callback_token": "signed-session-token",
+            }
+        finally:
+            thread.shutdown()
+            thread.join(timeout=5)
+
     async def test_service_without_registration_tool_registers_normally(self) -> None:
         fixture = _HubRegistrationFixture(include_registration_tool=False)
         registry, thread = await _load_registry(fixture)

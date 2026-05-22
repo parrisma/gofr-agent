@@ -1,225 +1,194 @@
-# =============================================================================
-# gofr-doc Test Stack (Ephemeral)
-# =============================================================================
-# Mirrors the gofr-dig compose.dev.yml pattern.
-# Spun up by scripts/start-test-env.sh, used by scripts/run_tests.sh.
-#
-# Services listen on INTERNAL prod ports (8040-8042),
-# host-mapped to TEST ports (8140-8142) via gofr_ports.env.
-#
-# Auth is always enabled.  Vault runs in dev mode inside this stack;
-# vault-init seeds the JWT signing secret before app containers start.
-# JWT signing secret is read from Vault by JwtSecretProvider.
-#
-# Port Configuration:
-#   All ports defined in lib/gofr-common/config/gofr_ports.env
-#   Test ports (prod + 100) -- see gofr_ports.env
-#   Containers run internally on prod ports
-#
-# Usage:
-#   # Normally invoked via scripts/start-test-env.sh, not directly.
-#   docker compose -f docker/compose.dev.yml --project-directory . up -d
-#   docker compose -f docker/compose.dev.yml --project-directory . logs -f
-#   docker compose -f docker/compose.dev.yml --project-directory . down
-# =============================================================================
+name: gofr-agent-dev
 
-name: gofr-doc-test
-
-# ── Shared anchors ──────────────────────────────────────────────────────────
-
-x-gofr-ports: &gofr-ports
-  env_file:
-    - lib/gofr-common/config/gofr_ports.env
-
-# Shared settings for all gofr-doc application services
-x-gofr-doc-common: &gofr-doc-common
-  <<: *gofr-ports
-  image: gofr-doc-prod:latest
-  restart: "no"
+x-agent-common: &agent-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.dev
+  image: gofr-agent-dev:latest
+  user: "${GOFR_AGENT_COMPOSE_USER:-0:0}"
+  working_dir: /home/gofr/devroot/gofr-agent
+  restart: unless-stopped
+  volumes:
+    - gofr-agent-data-dev:/home/gofr/devroot/gofr-agent/data:rw
+  environment:
+    GOFR_AGENT_LLM_MODEL: ${GOFR_AGENT_LLM_MODEL:-test}
+    OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    GOFR_AGENT_LOG_LEVEL: ${GOFR_AGENT_LOG_LEVEL:-INFO}
+    GOFR_AGENT_MCP_ALLOWED_HOSTS: ${GOFR_AGENT_MCP_ALLOWED_HOSTS:-gofr-agent-dev,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,gofr-agent-runtime,gofr-agent-runtime:8090,gofr-agent-workspace,gofr-agent-workspace:8090,gofr-agent-manual,gofr-agent-manual:8090,127.0.0.1:*,localhost:*,[::1]:*}
+    GOFR_AGENT_MCP_ALLOWED_ORIGINS: ${GOFR_AGENT_MCP_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000}
+    GOFR_AGENT_CORS_ORIGINS: ${GOFR_AGENT_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000}
   networks:
-    - gofr-test-net
+    - gofr-dev-net
 
-# ── Services ────────────────────────────────────────────────────────────────
+x-fixture-common: &fixture-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.fixtures
+  image: gofr-agent-mcp-fixtures:latest
+  user: "10001:10001"
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  cap_drop:
+    - ALL
+  restart: unless-stopped
+  networks:
+    - gofr-dev-net
 
 services:
-
-  # ==========================================================================
-  # 0a. Vault (Ephemeral Dev Mode)
-  # ==========================================================================
-  vault:
-    image: hashicorp/vault:1.15.4
-    container_name: gofr-doc-vault-test
-    hostname: gofr-doc-vault-test
-    restart: "no"
-    cap_add:
-      - IPC_LOCK
-    environment:
-      - VAULT_DEV_ROOT_TOKEN_ID=gofr-dev-root-token
-      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
-      - VAULT_LOG_LEVEL=warn
-      - VAULT_ADDR=http://127.0.0.1:8200
-    command: server -dev
+  gofr-agent-runtime:
+    <<: *agent-common
+    profiles: ["runtime"]
+    container_name: gofr-agent-runtime
+    hostname: gofr-agent-runtime
+    command:
+      - ./scripts/start-real-server.sh
+      - --services-file
+      - /home/gofr/devroot/gofr-agent/docker/services.compose.dev.yml
+      - --hub-store-backend
+      - external_cache
+      - --hub-cache-url
+      - redis://gofr-agent-valkey:6379/0
+      - --hub-url
+      - http://gofr-agent-dev:8090/mcp
+    depends_on:
+      valkey:
+        condition: service_healthy
+      mcp-instruments:
+        condition: service_healthy
+      mcp-clients:
+        condition: service_healthy
+      mcp-trades:
+        condition: service_healthy
+      mcp-analytics:
+        condition: service_healthy
     ports:
-      - "${GOFR_VAULT_PORT_TEST:-8301}:8200"
+      - "8090:8090"
+    networks:
+      gofr-dev-net:
+        aliases:
+          - gofr-agent-dev
     healthcheck:
-      test: ["CMD", "vault", "status"]
-      interval: 2s
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8090/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  gofr-agent-workspace:
+    <<: *agent-common
+    profiles: ["workspace"]
+    container_name: gofr-agent-workspace
+    hostname: gofr-agent-workspace
+    command: ["tail", "-f", "/dev/null"]
+    depends_on:
+      valkey:
+        condition: service_healthy
+      mcp-instruments:
+        condition: service_healthy
+      mcp-clients:
+        condition: service_healthy
+      mcp-trades:
+        condition: service_healthy
+      mcp-analytics:
+        condition: service_healthy
+    ports:
+      - "8090:8090"
+    networks:
+      gofr-dev-net:
+        aliases:
+          - gofr-agent-dev
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: gofr-agent-valkey
+    hostname: gofr-agent-valkey
+    restart: unless-stopped
+    command:
+      - valkey-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
       timeout: 3s
-      retries: 15
+      retries: 5
       start_period: 5s
     networks:
-      - gofr-test-net
+      - gofr-dev-net
 
-  # ==========================================================================
-  # 0b. Vault Init (Seed Secrets -- runs once then exits)
-  # ==========================================================================
-  vault-init:
-    image: hashicorp/vault:1.15.4
-    container_name: gofr-doc-vault-init-test
-    restart: "no"
-    depends_on:
-      vault:
-        condition: service_healthy
+  mcp-instruments:
+    <<: *fixture-common
+    container_name: gofr-agent-mcp-instruments
+    hostname: gofr-agent-mcp-instruments
+    command: ["--service", "instruments", "--port", "8500"]
     environment:
-      - VAULT_ADDR=http://gofr-doc-vault-test:8200
-      - VAULT_TOKEN=gofr-dev-root-token
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        echo "Seeding test secrets into Vault..."
-        vault kv put secret/gofr/config/jwt-signing-secret \
-          value="test-secret-key-for-secure-testing-do-not-use-in-production"
-        echo "Vault secrets seeded successfully."
-    networks:
-      - gofr-test-net
-
-  # ==========================================================================
-  # 1. MCP Server (Core Logic -- Streamable HTTP)
-  # ==========================================================================
-  mcp:
-    <<: *gofr-doc-common
-    container_name: gofr-doc-mcp-test
-    hostname: gofr-doc-mcp-test
-    user: root
-    working_dir: /home/gofr-doc
-    entrypoint: ["/bin/sh", "-c"]
-    depends_on:
-      vault-init:
-        condition: service_completed_successfully
-    command:
-      - |
-        mkdir -p /home/gofr-doc/data/storage /home/gofr-doc/data/sessions /home/gofr-doc/logs
-        for subdir in templates styles fragments images; do
-          src="/home/gofr-doc/_content/$${subdir}"
-          dst="/home/gofr-doc/data/$${subdir}"
-          if [ -d "$${src}" ]; then cp -a "$${src}/." "$${dst}/" 2>/dev/null || cp -r "$${src}/." "$${dst}/"; fi
-        done
-        chown -R gofr-doc:gofr-doc /home/gofr-doc/data /home/gofr-doc/logs
-        exec su -s /bin/bash gofr-doc -c '/home/gofr-doc/.venv/bin/python -m app.main_mcp --host 0.0.0.0 --port $${GOFR_DOC_MCP_PORT} --templates-dir /home/gofr-doc/data/templates --styles-dir /home/gofr-doc/data/styles --web-url http://gofr-doc-web-test:$${GOFR_DOC_WEB_PORT} --proxy-url-mode url'
-    environment:
-      - GOFR_DOC_ENV=TEST
-      - GOFR_DOC_MCP_PORT=${GOFR_DOC_MCP_PORT}
-      - GOFR_DOC_LOG_LEVEL=${GOFR_DOC_LOG_LEVEL:-DEBUG}
-      - GOFR_DOC_AUTH_BACKEND=vault
-      - GOFR_DOC_VAULT_URL=http://gofr-doc-vault-test:8200
-      - GOFR_DOC_VAULT_TOKEN=gofr-dev-root-token
-      - GOFR_DOC_VAULT_PATH_PREFIX=${GOFR_DOC_VAULT_PATH_PREFIX:-gofr/auth}
-      - GOFR_DOC_VAULT_MOUNT=${GOFR_DOC_VAULT_MOUNT:-secret}
-      - GOFR_DOC_WEB_URL=http://gofr-doc-web-test:${GOFR_DOC_WEB_PORT:-8042}
-    ports:
-      - "${GOFR_DOC_MCP_HOST_PORT:-${GOFR_DOC_MCP_PORT_TEST}}:${GOFR_DOC_MCP_PORT}"
+      SERVICE_NAME: gofr-agent-mcp-instruments
+      SERVICE_PORT: "8500"
+      GOFR_FIXTURES_HUB_CALLBACK_TOKEN: ${GOFR_FIXTURES_HUB_CALLBACK_TOKEN:-dev-fixtures-hub-token}
     healthcheck:
-      test: ["CMD-SHELL", "/home/gofr-doc/.venv/bin/python -c 'import os,socket; port=int(os.environ.get(\"GOFR_DOC_MCP_PORT\",\"8040\")); s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\", port)); s.close()'"]
-      interval: 5s
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 8500)); s.close()"]
+      interval: 10s
       timeout: 3s
-      retries: 12
-      start_period: 20s
-    volumes:
-      - gofr-doc-storage:/home/gofr-doc/data/storage
-
-  # ==========================================================================
-  # 2. MCPO Server (OpenAPI Wrapper)
-  # ==========================================================================
-  mcpo:
-    <<: *gofr-doc-common
-    container_name: gofr-doc-mcpo-test
-    hostname: gofr-doc-mcpo-test
-    user: gofr-doc
-    working_dir: /home/gofr-doc
-    entrypoint: []
-    depends_on:
-      mcp:
-        condition: service_healthy
-    command: >
-      /home/gofr-doc/.venv/bin/mcpo
-      --host 0.0.0.0 --port ${GOFR_DOC_MCPO_PORT} --server-type streamable-http
-      -- http://gofr-doc-mcp-test:${GOFR_DOC_MCP_PORT}/mcp
-    environment:
-      - GOFR_DOC_ENV=TEST
-      - GOFR_DOC_MCP_PORT=${GOFR_DOC_MCP_PORT:-8040}
-      - GOFR_DOC_MCPO_PORT=${GOFR_DOC_MCPO_PORT:-8041}
-    ports:
-      - "${GOFR_DOC_MCPO_HOST_PORT:-${GOFR_DOC_MCPO_PORT_TEST}}:${GOFR_DOC_MCPO_PORT}"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:${GOFR_DOC_MCPO_PORT}/openapi.json || exit 1"]
-      interval: 15s
-      timeout: 5s
       retries: 3
       start_period: 15s
 
-  # ==========================================================================
-  # 3. Web Server (REST API)
-  # ==========================================================================
-  web:
-    <<: *gofr-doc-common
-    container_name: gofr-doc-web-test
-    hostname: gofr-doc-web-test
-    user: root
-    working_dir: /home/gofr-doc
-    entrypoint: ["/bin/sh", "-c"]
-    depends_on:
-      vault-init:
-        condition: service_completed_successfully
-    command:
-      - |
-        mkdir -p /home/gofr-doc/data/storage /home/gofr-doc/data/sessions /home/gofr-doc/logs
-        for subdir in templates styles fragments images; do
-          src="/home/gofr-doc/_content/$${subdir}"
-          dst="/home/gofr-doc/data/$${subdir}"
-          if [ -d "$${src}" ]; then cp -a "$${src}/." "$${dst}/" 2>/dev/null || cp -r "$${src}/." "$${dst}/"; fi
-        done
-        chown -R gofr-doc:gofr-doc /home/gofr-doc/data /home/gofr-doc/logs
-        exec su -s /bin/bash gofr-doc -c '/home/gofr-doc/.venv/bin/python -m app.main_web --host 0.0.0.0 --port $${GOFR_DOC_WEB_PORT} --templates-dir /home/gofr-doc/data/templates --fragments-dir /home/gofr-doc/data/fragments --styles-dir /home/gofr-doc/data/styles'
+  mcp-clients:
+    <<: *fixture-common
+    container_name: gofr-agent-mcp-clients
+    hostname: gofr-agent-mcp-clients
+    command: ["--service", "clients", "--port", "8501"]
     environment:
-      - GOFR_DOC_ENV=TEST
-      - GOFR_DOC_WEB_PORT=${GOFR_DOC_WEB_PORT}
-      - GOFR_DOC_LOG_LEVEL=${GOFR_DOC_LOG_LEVEL:-DEBUG}
-      - GOFR_DOC_AUTH_BACKEND=vault
-      - GOFR_DOC_VAULT_URL=http://gofr-doc-vault-test:8200
-      - GOFR_DOC_VAULT_TOKEN=gofr-dev-root-token
-      - GOFR_DOC_VAULT_PATH_PREFIX=${GOFR_DOC_VAULT_PATH_PREFIX:-gofr/auth}
-      - GOFR_DOC_VAULT_MOUNT=${GOFR_DOC_VAULT_MOUNT:-secret}
-      - GOFR_DOC_IMAGES_DIR=/home/gofr-doc/data/images
-    ports:
-      - "${GOFR_DOC_WEB_HOST_PORT:-${GOFR_DOC_WEB_PORT_TEST}}:${GOFR_DOC_WEB_PORT}"
+      SERVICE_NAME: gofr-agent-mcp-clients
+      SERVICE_PORT: "8501"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:${GOFR_DOC_WEB_PORT}/ping || exit 1"]
-      interval: 15s
-      timeout: 5s
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 8501)); s.close()"]
+      interval: 10s
+      timeout: 3s
       retries: 3
-      start_period: 20s
-    volumes:
-      - gofr-doc-storage:/home/gofr-doc/data/storage
+      start_period: 15s
 
-# ── Network ─────────────────────────────────────────────────────────────────
+  mcp-trades:
+    <<: *fixture-common
+    container_name: gofr-agent-mcp-trades
+    hostname: gofr-agent-mcp-trades
+    command: ["--service", "trades", "--port", "8502"]
+    environment:
+      SERVICE_NAME: gofr-agent-mcp-trades
+      SERVICE_PORT: "8502"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 8502)); s.close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+  mcp-analytics:
+    <<: *fixture-common
+    container_name: gofr-agent-mcp-analytics
+    hostname: gofr-agent-mcp-analytics
+    command: ["--service", "analytics", "--port", "8503"]
+    environment:
+      SERVICE_NAME: gofr-agent-mcp-analytics
+      SERVICE_PORT: "8503"
+      GOFR_FIXTURES_HUB_CALLBACK_TOKEN: ${GOFR_FIXTURES_HUB_CALLBACK_TOKEN:-dev-fixtures-hub-token}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 8503)); s.close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
 
 networks:
-  gofr-test-net:
-    name: gofr-test-net
-    external: true
-
-# ── Volumes ─────────────────────────────────────────────────────────────────
+  gofr-dev-net:
+    name: gofr-dev-net
+    driver: bridge
 
 volumes:
-  gofr-doc-storage:
-
+  gofr-agent-data-dev:

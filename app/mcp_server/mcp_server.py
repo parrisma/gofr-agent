@@ -61,8 +61,15 @@ from app.exceptions import (
     ServiceRegistrationPolicyError,
 )
 from app.health import build_health_payload, build_ping_payload
-from app.hub import ResultStore
-from app.hub.auth import resolve_service_principal
+from app.hub import HubAccessScope, HubResultStore, ResultStore
+from app.hub.auth import (
+    HubCallbackTokenClaims,
+    HubCallbackTokenError,
+    ServicePrincipal,
+    resolve_service_principal,
+    resolve_service_principal_by_name,
+    validate_hub_callback_token,
+)
 from app.hub.errors import (
     HUB_MALFORMED_REQUEST,
     HUB_REGISTRATION_REQUIRED,
@@ -80,6 +87,11 @@ from app.hub.models import (
     GetResultResponse,
     StoreResultRequest,
     StoreResultResponse,
+)
+from app.hub.store_types import (
+    HUB_OPERATION_DESCRIBE,
+    HUB_OPERATION_GET,
+    HUB_OPERATION_STORE,
 )
 from app.logger import get_logger
 from app.request_context import request_log_fields, reset_request_id, set_request_id
@@ -231,21 +243,15 @@ def _validate_ask_request(
     return cleaned_question, resolved_max_steps, cleaned_model_override, cleaned_output_format
 
 
-def _guard(
-    auth_service: AuthService,
+def _extract_token(
     required_activity: str,
     *,
     hub_error_code: str | None = None,
 ) -> str:
-    """Extract the bearer token and enforce *required_activity*.
-
-    Returns the raw token string so callers can forward it downstream.
-    Raises McpError on any auth failure (missing token, denied, service down).
-    """
+    """Extract the bearer token from the current request context."""
     raw = get_auth_header_from_context()
     try:
-        token = extract_bearer_token({"authorization": raw})
-        require_activity(auth_service, token, required_activity)
+        return extract_bearer_token({"authorization": raw})
     except AuthTokenInvalidError as exc:
         if hub_error_code is not None:
             raise hub_mcp_error(hub_error_code, str(exc)) from exc
@@ -257,6 +263,22 @@ def _guard(
             **request_log_fields(),
         )
         raise McpError(ErrorData(code=INVALID_PARAMS, message=str(exc))) from exc
+
+
+def _guard(
+    auth_service: AuthService,
+    required_activity: str,
+    *,
+    hub_error_code: str | None = None,
+) -> str:
+    """Extract the bearer token and enforce *required_activity*.
+
+    Returns the raw token string so callers can forward it downstream.
+    Raises McpError on any auth failure (missing token, denied, service down).
+    """
+    token = _extract_token(required_activity, hub_error_code=hub_error_code)
+    try:
+        require_activity(auth_service, token, required_activity)
     except AuthorizationError as exc:
         if hub_error_code is not None:
             raise hub_mcp_error(hub_error_code, str(exc)) from exc
@@ -296,7 +318,7 @@ def create_mcp_server(
     agent: GofrAgent,
     session_store: SessionStore,
     auth_service: AuthService,
-    result_store: ResultStore | None = None,
+    result_store: HubResultStore | None = None,
 ) -> FastMCP:
     """Build and return the FastMCP application.
 
@@ -312,7 +334,7 @@ def create_mcp_server(
             "cannot be verified."
         ),
     )
-    store = result_store or ResultStore(config)
+    store: HubResultStore = result_store or ResultStore(config)
 
     def _notifier_from_context(
         ctx: Context | None,
@@ -330,7 +352,12 @@ def create_mcp_server(
 
         return _notify
 
-    def _require_hub_principal(principal, *, can_publish: bool = False, can_consume: bool = False):
+    def _require_hub_principal(
+        principal: ServicePrincipal | None,
+        *,
+        can_publish: bool = False,
+        can_consume: bool = False,
+    ) -> ServicePrincipal:
         if principal is None:
             raise_hub_error(
                 HUB_UNREGISTERED_SERVICE,
@@ -354,6 +381,100 @@ def create_mcp_server(
                 HUB_RESULT_TYPE_NOT_ALLOWED,
                 f"result_type is not allowed for service {principal.service_name}: {result_type}",
             )
+
+    def _require_scope_result_type_allowed(
+        scope: HubAccessScope,
+        result_type: str,
+    ) -> None:
+        if scope.allowed_result_types and result_type not in scope.allowed_result_types:
+            raise_hub_error(
+                HUB_RESULT_TYPE_NOT_ALLOWED,
+                (
+                    "result_type is not allowed for callback token scope "
+                    f"{scope.principal_service}: {result_type}"
+                ),
+            )
+
+    def _scope_result_types(
+        principal: ServicePrincipal,
+        claims: HubCallbackTokenClaims | None,
+    ) -> tuple[str, ...]:
+        if claims is None or not claims.result_types:
+            return principal.result_types
+
+        invalid_result_types = [
+            result_type
+            for result_type in claims.result_types
+            if result_type not in principal.result_types
+        ]
+        if invalid_result_types:
+            raise_hub_error(
+                HUB_UNAUTHORISED,
+                "hub callback token result types exceed registered capabilities",
+            )
+        return claims.result_types
+
+    def _build_signed_scope(
+        claims: HubCallbackTokenClaims,
+        *,
+        can_publish: bool = False,
+        can_consume: bool = False,
+    ) -> tuple[ServicePrincipal, HubAccessScope]:
+        principal = _require_hub_principal(
+            resolve_service_principal_by_name(claims.service, registry),
+            can_publish=can_publish,
+            can_consume=can_consume,
+        )
+        return principal, HubAccessScope(
+            session_namespace=claims.session_namespace,
+            principal_service=principal.service_name,
+            allowed_operations=claims.ops,
+            allowed_result_types=_scope_result_types(principal, claims),
+            request_id=claims.request_id,
+            run_id=claims.run_id,
+        )
+
+    def _resolve_hub_access(
+        *,
+        token: str,
+        required_activity: str,
+        required_operation: str,
+        can_publish: bool = False,
+        can_consume: bool = False,
+    ) -> tuple[ServicePrincipal, HubAccessScope]:
+        if config.hub_callback_token_secret and token.count(".") == 2:
+            try:
+                claims = validate_hub_callback_token(
+                    token,
+                    config.hub_callback_token_secret,
+                    required_operation=required_operation,
+                )
+            except HubCallbackTokenError as exc:
+                raise_hub_error(HUB_UNAUTHORISED, str(exc))
+            return _build_signed_scope(
+                claims,
+                can_publish=can_publish,
+                can_consume=can_consume,
+            )
+
+        try:
+            require_activity(auth_service, token, required_activity)
+        except AuthorizationError as exc:
+            raise_hub_error(HUB_UNAUTHORISED, str(exc))
+        except AuthServiceUnavailableError:
+            raise_hub_error(HUB_UNAUTHORISED, "Auth service unavailable")
+
+        principal = _require_hub_principal(
+            resolve_service_principal(token, registry),
+            can_publish=can_publish,
+            can_consume=can_consume,
+        )
+        return principal, HubAccessScope(
+            session_namespace="__legacy__",
+            principal_service=principal.service_name,
+            allowed_operations=(required_operation,),
+            allowed_result_types=principal.result_types,
+        )
 
     # ------------------------------------------------------------------
     # ping
@@ -379,7 +500,7 @@ def create_mcp_server(
     async def health_check() -> dict[str, Any]:
         _guard(auth_service, AGENT_HEALTH_CHECK)
         try:
-            return build_health_payload(config, registry, agent)
+            return build_health_payload(config, registry, agent, await store.health())
         except Exception as exc:
             logger.error(
                 "MCP health_check payload construction failed",
@@ -406,9 +527,14 @@ def create_mcp_server(
         source_args: dict[str, Any] | None = None,
         ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
-        token = _guard(auth_service, AGENT_HUB_STORE, hub_error_code=HUB_UNAUTHORISED)
-        principal = resolve_service_principal(token, registry)
+        token = _extract_token(AGENT_HUB_STORE, hub_error_code=HUB_UNAUTHORISED)
         try:
+            principal, scope = _resolve_hub_access(
+                token=token,
+                required_activity=AGENT_HUB_STORE,
+                required_operation=HUB_OPERATION_STORE,
+                can_publish=True,
+            )
             request = StoreResultRequest(
                 protocol_version=protocol_version,
                 producer_service=producer_service,
@@ -420,14 +546,14 @@ def create_mcp_server(
                 source_args=source_args,
                 ttl_seconds=ttl_seconds,
             )
-            principal = _require_hub_principal(principal, can_publish=True)
             if principal.service_name != request.producer_service:
                 raise_hub_error(
                     HUB_UNREGISTERED_SERVICE,
                     "producer_service does not match callback token",
                 )
             _require_result_type_allowed(principal, request.result_type)
-            descriptor = await store.store(request)
+            _require_scope_result_type_allowed(scope, request.result_type)
+            descriptor = await store.store(scope, request)
         except ValidationError as exc:
             raise hub_mcp_error(HUB_MALFORMED_REQUEST, str(exc)) from exc
         except HubError as exc:
@@ -447,9 +573,14 @@ def create_mcp_server(
         expected_result_type: str | None = None,
         expected_schema_id: str | None = None,
     ) -> dict[str, Any]:
-        token = _guard(auth_service, AGENT_HUB_FETCH, hub_error_code=HUB_UNAUTHORISED)
-        principal = resolve_service_principal(token, registry)
+        token = _extract_token(AGENT_HUB_FETCH, hub_error_code=HUB_UNAUTHORISED)
         try:
+            principal, scope = _resolve_hub_access(
+                token=token,
+                required_activity=AGENT_HUB_FETCH,
+                required_operation=HUB_OPERATION_GET,
+                can_consume=True,
+            )
             request = GetResultRequest(
                 protocol_version=protocol_version,
                 result_guid=result_guid,
@@ -457,11 +588,12 @@ def create_mcp_server(
                 expected_result_type=expected_result_type,
                 expected_schema_id=expected_schema_id,
             )
-            principal = _require_hub_principal(principal, can_consume=True)
             if request.expected_result_type is not None:
                 _require_result_type_allowed(principal, request.expected_result_type)
-            response = await store.get(request)
+                _require_scope_result_type_allowed(scope, request.expected_result_type)
+            response = await store.get(scope, request)
             _require_result_type_allowed(principal, response.metadata.result_type)
+            _require_scope_result_type_allowed(scope, response.metadata.result_type)
         except ValidationError as exc:
             raise hub_mcp_error(HUB_MALFORMED_REQUEST, str(exc)) from exc
         except HubError as exc:
@@ -481,9 +613,14 @@ def create_mcp_server(
         expected_result_type: str | None = None,
         expected_schema_id: str | None = None,
     ) -> dict[str, Any]:
-        token = _guard(auth_service, AGENT_HUB_FETCH, hub_error_code=HUB_UNAUTHORISED)
-        principal = resolve_service_principal(token, registry)
+        token = _extract_token(AGENT_HUB_FETCH, hub_error_code=HUB_UNAUTHORISED)
         try:
+            principal, scope = _resolve_hub_access(
+                token=token,
+                required_activity=AGENT_HUB_FETCH,
+                required_operation=HUB_OPERATION_DESCRIBE,
+                can_consume=True,
+            )
             request = DescribeResultRequest(
                 protocol_version=protocol_version,
                 result_guid=result_guid,
@@ -491,11 +628,12 @@ def create_mcp_server(
                 expected_result_type=expected_result_type,
                 expected_schema_id=expected_schema_id,
             )
-            principal = _require_hub_principal(principal, can_consume=True)
             if request.expected_result_type is not None:
                 _require_result_type_allowed(principal, request.expected_result_type)
-            response = await store.describe(request)
+                _require_scope_result_type_allowed(scope, request.expected_result_type)
+            response = await store.describe(scope, request)
             _require_result_type_allowed(principal, response.metadata.result_type)
+            _require_scope_result_type_allowed(scope, response.metadata.result_type)
         except ValidationError as exc:
             raise hub_mcp_error(HUB_MALFORMED_REQUEST, str(exc)) from exc
         except HubError as exc:

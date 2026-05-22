@@ -4,7 +4,7 @@
 # Builds a slim Python image that runs the four in-process test MCP services
 # (instruments, clients, trades, analytics) as real HTTP servers.
 #
-# The image is used by docker/compose.fixtures.yml (Swarm stack).
+# The image is used by docker/compose.dev.yml for the local fixture services.
 # It only installs gofr-common + the minimal runtime deps needed by the
 # fixture modules — no heavy dev tooling.
 #
@@ -41,6 +41,7 @@ COPY tests/fixtures/mcp_services/              tests/fixtures/mcp_services/
 # Fixture services import hub protocol models and transport-security helpers.
 COPY app/__init__.py                           app/__init__.py
 COPY app/config.py                             app/config.py
+COPY app/logger/                               app/logger/
 COPY app/transport_security.py                 app/transport_security.py
 COPY app/hub/                                  app/hub/
 
@@ -64,7 +65,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PATH="/app/.venv/bin:$PATH"
 
-# ── Health probe helper (used by compose.fixtures.yml healthchecks) ───────────
+# ── Health probe helper (used by compose.dev.yml healthchecks) ────────────────
 # Simple TCP-connect; replace with an HTTP probe if FastMCP gains /health.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
     CMD python -c \

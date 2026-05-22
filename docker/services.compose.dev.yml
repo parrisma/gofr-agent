@@ -1,0 +1,22 @@
+services:
+  - name: instruments
+    url: http://gofr-agent-mcp-instruments:8500/mcp
+    token: dev-admin-token
+    description: Instrument reference data, spot prices, and OHLCV history
+    hub_callback_token: dev-fixtures-hub-token
+
+  - name: clients
+    url: http://gofr-agent-mcp-clients:8501/mcp
+    token: dev-admin-token
+    description: Client master data, holdings, watchlists, and mandates
+
+  - name: trades
+    url: http://gofr-agent-mcp-trades:8502/mcp
+    token: dev-admin-token
+    description: Trade blotter retrieval, aggregation, and realised P&L
+
+  - name: analytics
+    url: http://gofr-agent-mcp-analytics:8503/mcp
+    token: dev-admin-token
+    description: Derived analytics for market data, positions, and executions
+    hub_callback_token: dev-fixtures-hub-token

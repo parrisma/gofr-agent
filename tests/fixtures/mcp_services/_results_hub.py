@@ -8,9 +8,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from gofr_common.web import get_request_headers_from_context
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from app.hub.auth import GOFR_HUB_CALLBACK_TOKEN_HEADER, GOFR_HUB_URL_HEADER
 from app.hub.models import GetResultResponse, ResultDescriptor
 
 GOFR_FIXTURES_HUB_CALLBACK_TOKEN = "GOFR_FIXTURES_HUB_CALLBACK_TOKEN"
@@ -48,8 +50,18 @@ def configure_results_hub_auth(state: ResultsHubState, callback_token: str | Non
     state.callback_token = callback_token
 
 
+def _hub_url(state: ResultsHubState) -> str | None:
+    headers = get_request_headers_from_context()
+    return headers.get(GOFR_HUB_URL_HEADER.lower()) or state.hub_url
+
+
 def _callback_headers(state: ResultsHubState) -> dict[str, str]:
-    callback_token = state.callback_token or os.environ.get(GOFR_FIXTURES_HUB_CALLBACK_TOKEN)
+    headers = get_request_headers_from_context()
+    callback_token = (
+        headers.get(GOFR_HUB_CALLBACK_TOKEN_HEADER.lower())
+        or state.callback_token
+        or os.environ.get(GOFR_FIXTURES_HUB_CALLBACK_TOKEN)
+    )
     if not callback_token:
         return {}
     return {"Authorization": f"Bearer {callback_token}"}
@@ -103,7 +115,8 @@ async def store_result_via_hub(
     source_args: dict[str, Any],
     ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
-    if not state.hub_url:
+    hub_url = _hub_url(state)
+    if not hub_url:
         raise ValueError("Results hub is not configured")
 
     async with (
@@ -111,7 +124,7 @@ async def store_result_via_hub(
             headers=_callback_headers(state),
             timeout=_HUB_CALLBACK_TIMEOUT,
         ) as http_client,
-        streamable_http_client(state.hub_url, http_client=http_client) as (read, write, _),
+        streamable_http_client(hub_url, http_client=http_client) as (read, write, _),
         ClientSession(read, write) as client,
     ):
         await client.initialize()
@@ -154,7 +167,8 @@ async def fetch_result_via_hub(
     expected_result_type: str,
     expected_schema_id: str,
 ) -> tuple[Any, dict[str, Any]]:
-    if not state.hub_url:
+    hub_url = _hub_url(state)
+    if not hub_url:
         raise ValueError("Results hub is not configured")
 
     result_ref = ResultDescriptor.validate_reference(descriptor)
@@ -163,7 +177,7 @@ async def fetch_result_via_hub(
             headers=_callback_headers(state),
             timeout=_HUB_CALLBACK_TIMEOUT,
         ) as http_client,
-        streamable_http_client(state.hub_url, http_client=http_client) as (read, write, _),
+        streamable_http_client(hub_url, http_client=http_client) as (read, write, _),
         ClientSession(read, write) as client,
     ):
         await client.initialize()

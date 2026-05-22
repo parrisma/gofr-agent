@@ -1,0 +1,32 @@
+# =============================================================================
+# gofr-agent CLI Image
+# =============================================================================
+# Builds a slim Python image that runs the `app.cli.ask` entrypoint against a
+# running gofr-agent instance on the compose dev network.
+
+FROM python:3.11-slim
+
+LABEL org.opencontainers.image.title="gofr-agent CLI" \
+    org.opencontainers.image.description="Disposable CLI runner for app.cli.ask" \
+    org.opencontainers.image.source="https://github.com/parrisma/gofr-agent"
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md ./
+COPY lib/gofr-common/pyproject.toml  lib/gofr-common/pyproject.toml
+COPY lib/gofr-common/readme.md       lib/gofr-common/readme.md
+COPY lib/gofr-common/src/            lib/gofr-common/src/
+COPY app/                            app/
+
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv
+RUN uv sync --frozen --no-dev
+
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH=/app
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV GOFR_AGENT_URL=http://gofr-agent-dev:8090/mcp
+
+ENTRYPOINT ["python", "-m", "app.cli.ask"]

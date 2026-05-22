@@ -103,7 +103,11 @@ class SessionPool:
             self._semaphore.release()
 
     @asynccontextmanager
-    async def open_user_session(self, token: str) -> AsyncIterator[ClientSession]:
+    async def open_user_session(
+        self,
+        token: str,
+        extra_headers: dict[str, str] | None = None,
+    ) -> AsyncIterator[ClientSession]:
         """Open a one-shot session using the caller's bearer token.
 
         Unlike :meth:`checkout`, this does **not** use the persistent pool.
@@ -116,7 +120,8 @@ class SessionPool:
         """
         if not token:
             raise AuthTokenInvalidError("Bearer token required for downstream user session")
-        headers = {"Authorization": f"Bearer {token}"}
+        headers = dict(extra_headers or {})
+        headers["Authorization"] = f"Bearer {token}"
         async with (
             streamablehttp_client(self._service.url, headers=headers) as (r, w, _),
             ClientSession(r, w) as session,

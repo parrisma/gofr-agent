@@ -14,8 +14,10 @@
 # token       (optional) — bearer token sent in Authorization header
 # token_env   (optional) — name of env-var that holds the bearer token
 #                          (takes precedence over `token`)
-# hub_callback_token_env (optional) — env-var holding the service -> gofr-agent
-#               callback token for `_store_result` / `_get_result` access
+# hub_callback_token_env (optional) — env-var holding a legacy service ->
+#               gofr-agent callback token for `_store_result` / `_get_result`
+#               access. Normal hub-capable tool calls prefer per-request signed
+#               headers injected by gofr-agent at runtime.
 # description (optional) — shown in the agent's system prompt
 # enabled     (optional, default: true) — set to false to skip the service
 #

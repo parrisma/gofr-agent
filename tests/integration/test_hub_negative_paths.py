@@ -12,6 +12,7 @@ from tests.integration.test_analytics_hub_integration import (
     _PRODUCER_CALLBACK_TOKEN,
     _call_tool,
     _get_descriptor,
+    _signed_hub_token,
     _start_stack,
 )
 
@@ -20,6 +21,106 @@ _DESCRIPTOR_SUMMARY_INJECTION = "GOFR_PROMPT_HARDENING_PAYLOAD_DESCRIPTOR"
 
 @pytest.mark.asyncio
 class TestHubNegativePaths:
+    async def test_signed_callback_token_rejects_cross_session_fetch_and_describe(self) -> None:
+        stack = await _start_stack()
+
+        try:
+            producer_headers = {
+                "Authorization": (
+                    "Bearer "
+                    + _signed_hub_token(
+                        service="instruments",
+                        session_namespace="session-a",
+                        allowed_operations=("store",),
+                    )
+                )
+            }
+            consumer_headers_a = {
+                "Authorization": (
+                    "Bearer "
+                    + _signed_hub_token(
+                        service="analytics",
+                        session_namespace="session-a",
+                        allowed_operations=("get", "describe"),
+                    )
+                )
+            }
+            consumer_headers_b = {
+                "Authorization": (
+                    "Bearer "
+                    + _signed_hub_token(
+                        service="analytics",
+                        session_namespace="session-b",
+                        allowed_operations=("get", "describe"),
+                    )
+                )
+            }
+
+            store_error, store_raw = await _call_tool(
+                stack.local_hub_url,
+                "_store_result",
+                {
+                    "protocol_version": 1,
+                    "producer_service": "instruments",
+                    "producer_tool": "get_ohlcv_history",
+                    "result_type": "ohlcv_bars",
+                    "schema_id": "gofr.ohlcv_bars.v1",
+                    "payload": [{"date": "2026-05-13", "close": 182.917}],
+                    "summary": "signed scoped result",
+                },
+                headers=producer_headers,
+            )
+
+            assert store_error is False, store_raw
+            descriptor = json.loads(store_raw)["descriptor"]
+
+            fetch_error, fetch_raw = await _call_tool(
+                stack.local_hub_url,
+                "_get_result",
+                {
+                    "protocol_version": 1,
+                    "result_guid": descriptor["result_guid"],
+                    "hub_service": descriptor["hub_service"],
+                    "expected_result_type": "ohlcv_bars",
+                    "expected_schema_id": "gofr.ohlcv_bars.v1",
+                },
+                headers=consumer_headers_a,
+            )
+
+            assert fetch_error is False, fetch_raw
+
+            describe_error, describe_raw = await _call_tool(
+                stack.local_hub_url,
+                "_describe_result",
+                {
+                    "protocol_version": 1,
+                    "result_guid": descriptor["result_guid"],
+                    "hub_service": descriptor["hub_service"],
+                    "expected_result_type": "ohlcv_bars",
+                    "expected_schema_id": "gofr.ohlcv_bars.v1",
+                },
+                headers=consumer_headers_b,
+            )
+            fetch_error, fetch_raw = await _call_tool(
+                stack.local_hub_url,
+                "_get_result",
+                {
+                    "protocol_version": 1,
+                    "result_guid": descriptor["result_guid"],
+                    "hub_service": descriptor["hub_service"],
+                    "expected_result_type": "ohlcv_bars",
+                    "expected_schema_id": "gofr.ohlcv_bars.v1",
+                },
+                headers=consumer_headers_b,
+            )
+
+            assert describe_error is True
+            assert fetch_error is True
+            assert "hub.unknown_result" in describe_raw
+            assert "hub.unknown_result" in fetch_raw
+        finally:
+            await stack.shutdown()
+
     async def test_get_result_unknown_guid_returns_unknown_result(self) -> None:
         stack = await _start_stack()
 

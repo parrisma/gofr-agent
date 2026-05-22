@@ -1,45 +1,9 @@
-"""Tests for gofr-agent port registration in gofr-common and GofrAgentConfig."""
+"""Tests for gofr-agent configuration."""
 
 import pytest
-from gofr_common.config import GOFR_AGENT_PORTS, load_ports
-from gofr_common.config.ports import reset_ports_cache
 from pydantic import ValidationError
 
 from app.config import GofrAgentConfig
-
-
-class TestGofrAgentPorts:
-    def setup_method(self) -> None:
-        reset_ports_cache()
-
-    def test_default_ports_without_env_overrides(
-        self,
-        monkeypatch,
-    ) -> None:
-        monkeypatch.delenv("GOFR_AGENT_MCP_PORT", raising=False)
-        monkeypatch.delenv("GOFR_AGENT_MCPO_PORT", raising=False)
-        monkeypatch.delenv("GOFR_AGENT_WEB_PORT", raising=False)
-        reset_ports_cache()
-
-        ports = load_ports()["gofr-agent"]
-        assert ports.mcp == 8090
-        assert ports.mcpo == 8091
-        assert ports.web == 8092
-
-    def test_runtime_ports_can_be_overridden(self) -> None:
-        ports = load_ports(
-            env={
-                "GOFR_AGENT_MCP_PORT": "8190",
-                "GOFR_AGENT_MCPO_PORT": "8191",
-                "GOFR_AGENT_WEB_PORT": "8192",
-            }
-        )["gofr-agent"]
-        assert ports.mcp == 8190
-        assert ports.mcpo == 8191
-        assert ports.web == 8192
-
-    def test_ambient_constant_reflects_loaded_port_map(self) -> None:
-        assert load_ports()["gofr-agent"] == GOFR_AGENT_PORTS
 
 
 class TestGofrAgentConfig:
@@ -75,6 +39,19 @@ class TestGofrAgentConfig:
         assert cfg.allowed_models == []
         assert cfg.hub_enabled is False
         assert cfg.hub_url is None
+        assert cfg.hub_store_backend == "memory"
+        assert cfg.hub_cache_url is None
+        assert cfg.hub_cache_connect_timeout_seconds == 1
+        assert cfg.hub_cache_operation_timeout_seconds == 2
+        assert cfg.hub_cache_max_attempts == 2
+        assert cfg.hub_cache_retry_backoff_seconds == 0.2
+        assert cfg.hub_cache_request_budget_seconds == 5
+        assert cfg.hub_cache_key_prefix == "gofr-agent:hub"
+        assert cfg.hub_cache_memory_budget_bytes == 268435456
+        assert cfg.hub_cache_active_session_budget == 20
+        assert cfg.hub_callback_token_ttl_seconds == 600
+        assert cfg.hub_callback_token_secret is None
+        assert cfg.hub_cache_healthcheck_interval_seconds == 30
         assert cfg.hub_default_ttl_seconds > 0
         assert cfg.hub_max_payload_bytes > 0
         assert cfg.hub_max_results > 0
@@ -90,6 +67,7 @@ class TestGofrAgentConfig:
     def test_from_env_all_vars(self) -> None:
         env = {
             "GOFR_AGENT_MCP_PORT": "9090",
+            "GOFR_AGENT_MCPO_PORT": "9091",
             "GOFR_AGENT_LLM_MODEL": "anthropic:claude-3-haiku",
             "GOFR_AGENT_MCP_ALLOWED_HOSTS": ",".join(
                 [
@@ -125,6 +103,19 @@ class TestGofrAgentConfig:
             "GOFR_AGENT_ALLOWED_MODELS": "openai:gpt-4o-mini,deepseek/deepseek-v4-pro",
             "GOFR_AGENT_HUB_ENABLED": "true",
             "GOFR_AGENT_HUB_URL": "http://gofr-agent:8090/mcp",
+            "GOFR_AGENT_HUB_STORE_BACKEND": "external_cache",
+            "GOFR_AGENT_HUB_CACHE_URL": "redis://gofr-agent-valkey:6379/0",
+            "GOFR_AGENT_HUB_CACHE_CONNECT_TIMEOUT_SECONDS": "1.5",
+            "GOFR_AGENT_HUB_CACHE_OPERATION_TIMEOUT_SECONDS": "2.5",
+            "GOFR_AGENT_HUB_CACHE_MAX_ATTEMPTS": "3",
+            "GOFR_AGENT_HUB_CACHE_RETRY_BACKOFF_SECONDS": "0.5",
+            "GOFR_AGENT_HUB_CACHE_REQUEST_BUDGET_SECONDS": "6.5",
+            "GOFR_AGENT_HUB_CACHE_KEY_PREFIX": "gofr-agent:custom-hub",
+            "GOFR_AGENT_HUB_CACHE_MEMORY_BUDGET_BYTES": "536870912",
+            "GOFR_AGENT_HUB_CACHE_ACTIVE_SESSION_BUDGET": "25",
+            "GOFR_AGENT_HUB_CALLBACK_TOKEN_TTL_SECONDS": "900",
+            "GOFR_AGENT_HUB_CALLBACK_TOKEN_SECRET": "dev-hub-secret",  # pragma: allowlist secret
+            "GOFR_AGENT_HUB_CACHE_HEALTHCHECK_INTERVAL_SECONDS": "45",
             "GOFR_AGENT_HUB_DEFAULT_TTL_SECONDS": "1800",
             "GOFR_AGENT_HUB_MAX_PAYLOAD_BYTES": "524288",
             "GOFR_AGENT_HUB_MAX_RESULTS": "250",
@@ -139,6 +130,7 @@ class TestGofrAgentConfig:
         }
         cfg = GofrAgentConfig.from_env(env=env)
         assert cfg.mcp_port == 9090
+        assert cfg.mcpo_port == 9091
         assert cfg.llm_model == "anthropic:claude-3-haiku"
         assert cfg.mcp_allowed_hosts == [
             "gofr-agent-dev",
@@ -178,6 +170,19 @@ class TestGofrAgentConfig:
         assert cfg.allowed_models == ["openai:gpt-4o-mini", "deepseek/deepseek-v4-pro"]
         assert cfg.hub_enabled is True
         assert cfg.hub_url == "http://gofr-agent:8090/mcp"
+        assert cfg.hub_store_backend == "external_cache"
+        assert cfg.hub_cache_url == "redis://gofr-agent-valkey:6379/0"
+        assert cfg.hub_cache_connect_timeout_seconds == 1.5
+        assert cfg.hub_cache_operation_timeout_seconds == 2.5
+        assert cfg.hub_cache_max_attempts == 3
+        assert cfg.hub_cache_retry_backoff_seconds == 0.5
+        assert cfg.hub_cache_request_budget_seconds == 6.5
+        assert cfg.hub_cache_key_prefix == "gofr-agent:custom-hub"
+        assert cfg.hub_cache_memory_budget_bytes == 536870912
+        assert cfg.hub_cache_active_session_budget == 25
+        assert cfg.hub_callback_token_ttl_seconds == 900
+        assert cfg.hub_callback_token_secret == "dev-hub-secret"  # pragma: allowlist secret
+        assert cfg.hub_cache_healthcheck_interval_seconds == 45
         assert cfg.hub_default_ttl_seconds == 1800
         assert cfg.hub_max_payload_bytes == 524288
         assert cfg.hub_max_results == 250
@@ -193,6 +198,10 @@ class TestGofrAgentConfig:
     def test_hub_enabled_requires_hub_url(self) -> None:
         with pytest.raises(ValidationError, match="hub_url"):
             GofrAgentConfig.from_env(env={"GOFR_AGENT_HUB_ENABLED": "true"})
+
+    def test_external_cache_backend_requires_cache_url(self) -> None:
+        with pytest.raises(ValidationError, match="hub_cache_url"):
+            GofrAgentConfig(hub_store_backend="external_cache")
 
     def test_pending_prompt_ttl_must_be_positive(self) -> None:
         with pytest.raises(ValidationError, match="pending_prompt_ttl_seconds"):
@@ -270,3 +279,8 @@ class TestGofrAgentConfig:
 
         assert cfg.mcp_allowed_origins == ["http://localhost:3000"]
         assert cfg.cors_allowed_origins == ["https://console.example.internal"]
+
+    def test_hub_cache_key_prefix_rejects_whitespace(self) -> None:
+        with pytest.raises(ValidationError, match="hub_cache_key_prefix"):
+            GofrAgentConfig(hub_cache_key_prefix="bad prefix")
+

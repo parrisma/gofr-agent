@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 from app.config import GofrAgentConfig
 from app.health import build_health_payload, build_http_health_payload, build_ping_payload
+from app.hub import HubStoreHealth
 from app.services import ServiceConfig
 from app.services.discovery import MCPToolInfo
 from app.services.registry import ServiceHubCapabilities, ServiceRegistry
@@ -71,6 +72,11 @@ class TestHealthPayload:
 
         assert payload["status"] == "healthy"
         assert payload["message"] == "No downstream services registered"
+        assert payload["hub_store"] == {
+            "backend": "memory",
+            "status": "healthy",
+            "reachable": True,
+        }
         assert payload["downstream_services"]["total"] == 0
         assert payload["downstream_services"]["healthy"] == 0
         assert payload["downstream_services"]["items"] == []
@@ -243,6 +249,38 @@ class TestHealthPayload:
             "degraded": 0,
             "failed": 1,
         }
+        assert payload["hub_store"] == {
+            "backend": "memory",
+            "status": "healthy",
+            "reachable": True,
+        }
         assert "config" not in payload
         assert "downstream_services" not in payload
         _assert_no_sentinel_values(payload, {"sk-secret-sentinel", "secret-ish failure detail"})
+
+    def test_health_payload_includes_generic_external_cache_state(self) -> None:
+        payload = build_health_payload(
+            GofrAgentConfig(
+                hub_enabled=True,
+                hub_url="http://gofr-agent:8090/mcp",
+                hub_store_backend="external_cache",
+                hub_cache_url="redis://gofr-agent-valkey:6379/0",
+            ),
+            _registry(),
+            _AgentState(),
+            HubStoreHealth(
+                backend="external_cache",
+                status="degraded",
+                reachable=False,
+                error="cache timed out",
+                indexed_result_count=7,
+            ),
+        )
+
+        assert payload["hub_store"] == {
+            "backend": "external_cache",
+            "status": "degraded",
+            "reachable": False,
+            "indexed_result_count": 7,
+            "error": "cache timed out",
+        }

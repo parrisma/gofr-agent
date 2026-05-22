@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Interactive fixture chat launcher for manual gofr-agent testing.
 
-Starts the Docker Swarm fixture services, boots a local gofr-agent MCP server
-configured against those services, then opens a small prompt loop that calls the
-existing CLI with a shared session ID.
+Starts the Compose-managed fixture services, boots a local gofr-agent MCP
+server configured against those services, then opens a small prompt loop that
+calls the existing CLI with a shared session ID.
 """
 
 from __future__ import annotations
@@ -58,7 +58,8 @@ from app.transport_security import apply_transport_security
 from tests.fixtures.mcp_services import analytics, instruments
 from tests.fixtures.mcp_services._server import _UvicornThread, make_service_server
 
-FIXTURE_STACK = PROJECT_ROOT / "docker" / "fixtures-stack.sh"
+COMPOSE_FILE = PROJECT_ROOT / "docker" / "compose.dev.yml"
+DEV_NETWORK = "gofr-dev-net"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
 DEV_TOKEN = "dev-admin-token"
@@ -72,12 +73,20 @@ SERVICE_PORTS = {
     "analytics": 8503,
 }
 
-OVERLAY_HOSTS = {
+COMPOSE_HOSTS = {
     "instruments": "gofr-agent-mcp-instruments",
     "clients": "gofr-agent-mcp-clients",
     "trades": "gofr-agent-mcp-trades",
     "analytics": "gofr-agent-mcp-analytics",
 }
+
+COMPOSE_SERVICES = [
+    "valkey",
+    "mcp-instruments",
+    "mcp-clients",
+    "mcp-trades",
+    "mcp-analytics",
+]
 
 
 class AgentServerThread(threading.Thread):
@@ -161,8 +170,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--network",
-        choices=["auto", "overlay", "localhost"],
-        default="overlay",
+        choices=["auto", "compose", "localhost"],
+        default="compose",
         help="How the agent reaches fixture services.",
     )
     parser.add_argument(
@@ -219,28 +228,62 @@ def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def stack_is_running() -> bool:
+def fixture_services_are_running() -> bool:
     result = subprocess.run(
-        ["docker", "stack", "services", "gofr-agent-mcp-fixtures"],
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(COMPOSE_FILE),
+            "ps",
+            "--services",
+            "--status",
+            "running",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    running = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    return all(service in running for service in COMPOSE_SERVICES)
+
+
+def connect_current_container_to_dev_net() -> None:
+    current_container_id = socket.gethostname()
+    docker_ps = subprocess.run(
+        ["docker", "ps", "-q", "--filter", f"id={current_container_id}"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if not docker_ps.stdout.strip():
+        return
+
+    subprocess.run(
+        ["docker", "network", "connect", DEV_NETWORK, current_container_id],
         cwd=PROJECT_ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
     )
-    return result.returncode == 0
 
 
 def start_fixture_stack(skip_build: bool, skip_stack: bool) -> bool:
     if skip_stack:
         return False
 
-    already_running = stack_is_running()
+    already_running = fixture_services_are_running()
     if not skip_build:
         print("Building fixture service image...")
-        run_command([str(FIXTURE_STACK), "build"])
+        run_command(["docker", "compose", "-f", str(COMPOSE_FILE), "build", *COMPOSE_SERVICES[1:]])
 
     print("Starting fixture service stack...")
-    run_command([str(FIXTURE_STACK), "start"])
+    run_command(["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", *COMPOSE_SERVICES])
+    connect_current_container_to_dev_net()
     return not already_running
 
 
@@ -248,7 +291,7 @@ def stop_fixture_stack(started_by_script: bool, keep_stack: bool, skip_stack: bo
     if skip_stack or keep_stack or not started_by_script:
         return
     print("Stopping fixture service stack...")
-    run_command([str(FIXTURE_STACK), "stop"])
+    run_command(["docker", "compose", "-f", str(COMPOSE_FILE), "stop", *COMPOSE_SERVICES])
 
 
 def can_connect(host: str, port: int, timeout_s: float = 1.0) -> bool:
@@ -282,13 +325,13 @@ def wait_for_services(hosts: dict[str, str], timeout_s: float = 60.0) -> None:
 
 
 def choose_service_hosts(mode: str) -> dict[str, str]:
-    if mode == "overlay":
-        return OVERLAY_HOSTS
+    if mode == "compose":
+        return COMPOSE_HOSTS
     if mode == "localhost":
         return {name: "127.0.0.1" for name in SERVICE_PORTS}
 
-    if can_resolve(OVERLAY_HOSTS["instruments"]):
-        return OVERLAY_HOSTS
+    if can_resolve(COMPOSE_HOSTS["instruments"]):
+        return COMPOSE_HOSTS
     return {name: "127.0.0.1" for name in SERVICE_PORTS}
 
 

@@ -161,6 +161,10 @@ class GofrAgent:
                 retry_attempts=self._config.tool_retry_attempts,
                 enforce_intent=self._config.intent_constraints_enabled,
                 sanitize_description=self._config.prompt_hardening_v2_enabled,
+                hub_url=self._config.hub_url if self._config.hub_enabled else None,
+                hub_callback_token_secret=self._config.hub_callback_token_secret,
+                hub_callback_token_ttl_seconds=self._config.hub_callback_token_ttl_seconds,
+                hub_capabilities=self._registry.service_hub_capabilities(info.service_name),
             )
             for info in visible_tool_infos
             for pool in [self._registry.get_pool(info.service_name)]
@@ -423,6 +427,7 @@ class GofrAgent:
         run_deps = AgentDeps(
             token=token,
             request_id=request_id,
+            session_id=session.session_id,
             intent_constraints=intent_constraints,
         )
 

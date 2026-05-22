@@ -24,6 +24,8 @@ from app.agent.agent import GofrAgent
 from app.auth import AuthService, get_auth_service
 from app.config import GofrAgentConfig
 from app.health import create_health_routes
+from app.hub import HubResultStore, HubStoreHealth, create_result_store
+from app.hub.errors import HubError
 from app.hub.models import REGISTER_RESULTS_HUB_TOOL
 from app.logger import get_logger
 from app.mcp_server.mcp_server import create_mcp_server
@@ -49,6 +51,7 @@ def create_configured_agent(
 def build_startup_validation_summary(
     config: GofrAgentConfig,
     registry: ServiceRegistry,
+    hub_store_health: HubStoreHealth | None = None,
 ) -> dict[str, Any]:
     service_count = 0
     degraded_service_count = 0
@@ -85,6 +88,18 @@ def build_startup_validation_summary(
         "hub_bind_host": config.host,
         "hub_bind_port": config.mcp_port,
         "hub_url_configured": bool(config.hub_url),
+        "hub_store_backend": config.hub_store_backend,
+        "hub_cache_url_configured": bool(config.hub_cache_url),
+        "hub_store_status": (
+            hub_store_health.status
+            if hub_store_health is not None
+            else ("healthy" if config.hub_store_backend == "memory" else "failed")
+        ),
+        "hub_store_reachable": (
+            hub_store_health.reachable
+            if hub_store_health is not None
+            else config.hub_store_backend == "memory"
+        ),
         "service_count": service_count,
         "degraded_service_count": degraded_service_count,
         "failed_service_count": failed_service_count,
@@ -95,16 +110,59 @@ def build_startup_validation_summary(
     }
 
 
+def required_hub_store_budget_bytes(config: GofrAgentConfig) -> int:
+    """Return the worst-case active-session payload budget in bytes."""
+    return (
+        config.hub_cache_active_session_budget
+        * config.hub_max_results
+        * config.hub_max_payload_bytes
+    )
+
+
+def validate_hub_store_budget(config: GofrAgentConfig) -> int:
+    """Fail fast when the external-cache sizing profile is internally inconsistent."""
+    required_bytes = required_hub_store_budget_bytes(config)
+    if config.hub_store_backend != "external_cache":
+        return required_bytes
+
+    safe_budget_bytes = (config.hub_cache_memory_budget_bytes * 7) // 10
+    if required_bytes > safe_budget_bytes:
+        raise ValueError(
+            "hub_cache_memory_budget_bytes does not leave safe headroom "
+            "for the external-cache profile"
+        )
+    return required_bytes
+
+
+async def initialise_result_store(
+    config: GofrAgentConfig,
+    result_store: HubResultStore,
+) -> HubStoreHealth:
+    """Start the configured hub store and return its generic health view."""
+    try:
+        await result_store.start()
+        health = await result_store.health()
+    except HubError as exc:
+        if config.hub_enabled and config.hub_store_backend == "external_cache":
+            raise RuntimeError(f"Hub store startup failed: {exc.message}") from exc
+        raise
+
+    if config.hub_enabled and config.hub_store_backend == "external_cache" and not health.reachable:
+        raise RuntimeError("Hub store startup failed: external cache is unreachable")
+    return health
+
+
 def create_agent_asgi_app(
     mcp: Any,
     config: GofrAgentConfig,
     registry: ServiceRegistry,
     agent: GofrAgent,
+    result_store: HubResultStore,
 ) -> Any:
     """Build the production ASGI app with public health routes."""
     apply_transport_security(mcp, config)
     app = mcp.streamable_http_app()
-    app.routes.extend(create_health_routes(config, registry, agent))
+    app.routes.extend(create_health_routes(config, registry, agent, result_store))
     wrapped_app = AuthHeaderMiddleware(app)
     cors_config = build_mcp_cors_config(config)
     if cors_config is None:
@@ -187,7 +245,14 @@ async def _run_server(args: argparse.Namespace) -> None:
     # Bootstrap
     registry = ServiceRegistry(config)
     await registry.load_manifest(manifest)
-    startup_summary = build_startup_validation_summary(config, registry)
+    validate_hub_store_budget(config)
+    result_store = create_result_store(config)
+    hub_store_health = await initialise_result_store(config, result_store)
+    startup_summary = build_startup_validation_summary(
+        config,
+        registry,
+        hub_store_health,
+    )
     logger.info("Startup validation", **startup_summary)
     if (
         startup_summary["services_advertising_results_hub"]
@@ -217,7 +282,14 @@ async def _run_server(args: argparse.Namespace) -> None:
     )
     await session_store.start_ttl_sweep()
 
-    mcp = create_mcp_server(config, registry, agent, session_store, auth_service)
+    mcp = create_mcp_server(
+        config,
+        registry,
+        agent,
+        session_store,
+        auth_service,
+        result_store,
+    )
 
     # Graceful shutdown
     loop = asyncio.get_running_loop()
@@ -233,7 +305,7 @@ async def _run_server(args: argparse.Namespace) -> None:
     logger.info("Starting gofr-agent MCP server", host=args.host, port=args.port)
 
     server_config = uvicorn.Config(
-        create_agent_asgi_app(mcp, config, registry, agent),
+        create_agent_asgi_app(mcp, config, registry, agent, result_store),
         host=args.host,
         port=args.port,
         log_level=args.log_level.lower(),
@@ -245,6 +317,7 @@ async def _run_server(args: argparse.Namespace) -> None:
 
     logger.info("Stopping registry")
     await registry.shutdown()
+    await result_store.stop()
     server.should_exit = True
     await serve_task
 

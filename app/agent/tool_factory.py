@@ -23,10 +23,17 @@ from app.agent.prompt_sanitizer import sanitize_metadata
 from app.auth.auth_service import AuthService
 from app.auth.permissions import downstream_activity, require_activity
 from app.exceptions import AuthorizationError, AuthTokenInvalidError, DownstreamToolError
+from app.hub.auth import (
+    GOFR_HUB_CALLBACK_TOKEN_HEADER,
+    GOFR_HUB_URL_HEADER,
+    derive_session_namespace,
+    mint_hub_callback_token,
+)
 from app.logger import get_logger
 from app.request_context import request_log_fields
 from app.services.discovery import MCPToolInfo
 from app.services.pool import SessionPool
+from app.services.registry import ServiceHubCapabilities
 
 logger = get_logger("gofr-agent.agent.tools")
 _URL_RE = re.compile(r"https?://\S+")
@@ -74,10 +81,66 @@ def _request_id_from_deps(deps: AgentDeps | str) -> str | None:
     return None
 
 
+def _session_id_from_deps(deps: AgentDeps | str) -> str | None:
+    if isinstance(deps, AgentDeps):
+        return deps.session_id
+    return None
+
+
+def _run_id_from_deps(deps: AgentDeps | str) -> str | None:
+    if isinstance(deps, AgentDeps):
+        return deps.run_id
+    return None
+
+
 def _auth_fingerprint(token: str) -> str:
     if not token:
         return "missing"
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+
+
+def _hub_context_headers(
+    *,
+    deps: AgentDeps | str,
+    service_name: str,
+    hub_url: str | None,
+    hub_callback_token_secret: str | None,
+    hub_callback_token_ttl_seconds: int,
+    hub_capabilities: ServiceHubCapabilities,
+) -> dict[str, str]:
+    if not hub_url or not hub_callback_token_secret:
+        return {}
+    if not hub_capabilities.supports_results_hub:
+        return {}
+
+    session_id = _session_id_from_deps(deps)
+    request_id = _request_id_from_deps(deps)
+    if not session_id or not request_id:
+        return {}
+
+    allowed_operations: list[str] = []
+    if hub_capabilities.can_publish_results:
+        allowed_operations.append("store")
+    if hub_capabilities.can_consume_results:
+        allowed_operations.extend(("get", "describe"))
+    if not allowed_operations:
+        return {}
+
+    session_namespace = derive_session_namespace(hub_callback_token_secret, session_id)
+    callback_token = mint_hub_callback_token(
+        secret=hub_callback_token_secret,
+        service=service_name,
+        session_namespace=session_namespace,
+        allowed_operations=tuple(allowed_operations),
+        allowed_result_types=hub_capabilities.result_types,
+        ttl_seconds=hub_callback_token_ttl_seconds,
+        request_id=request_id,
+        run_id=_run_id_from_deps(deps),
+    )
+    return {
+        GOFR_HUB_URL_HEADER: hub_url,
+        GOFR_HUB_CALLBACK_TOKEN_HEADER: callback_token,
+    }
 
 
 def _value_error_details(message: str) -> tuple[str, str]:
@@ -479,6 +542,10 @@ def make_tool(
     retry_attempts: int = 2,
     enforce_intent: bool = False,
     sanitize_description: bool = False,
+    hub_url: str | None = None,
+    hub_callback_token_secret: str | None = None,
+    hub_callback_token_ttl_seconds: int = 60,
+    hub_capabilities: ServiceHubCapabilities | None = None,
 ) -> Tool:  # type: ignore[type-arg]
     """Build a pydantic-ai :class:`Tool` that calls *info* via *pool*.
 
@@ -493,6 +560,7 @@ def make_tool(
     activity = downstream_activity(info.service_name, info.name)
     input_schema = _normalise_input_schema(info.input_schema)
     schema_validator = validator_for(input_schema)(input_schema)
+    effective_hub_capabilities = hub_capabilities or ServiceHubCapabilities()
 
     async def _call(ctx: RunContext[AgentDeps | str], **kwargs: Any) -> str:
         kwargs = _enrich_missing_args(ctx.deps, input_schema, kwargs)
@@ -541,7 +609,15 @@ def make_tool(
             started_at = perf_counter()
             try:
                 require_activity(auth_service, token, activity)
-                async with pool.open_user_session(token) as session:
+                extra_headers = _hub_context_headers(
+                    deps=ctx.deps,
+                    service_name=info.service_name,
+                    hub_url=hub_url,
+                    hub_callback_token_secret=hub_callback_token_secret,
+                    hub_callback_token_ttl_seconds=hub_callback_token_ttl_seconds,
+                    hub_capabilities=effective_hub_capabilities,
+                )
+                async with pool.open_user_session(token, extra_headers=extra_headers) as session:
                     result = await session.call_tool(info.name, kwargs)
 
                 text_parts: list[str] = []

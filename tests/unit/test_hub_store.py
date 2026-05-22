@@ -24,6 +24,7 @@ from app.hub.models import (
     StoreResultRequest,
 )
 from app.hub.store import ResultStore
+from app.hub.store_types import HubAccessScope
 
 
 class _FakeClock:
@@ -65,6 +66,15 @@ def _request(**overrides) -> StoreResultRequest:  # type: ignore[no-untyped-def]
     }
     defaults.update(overrides)
     return StoreResultRequest(**defaults)
+
+
+def _scope(session_namespace: str = "session-a") -> HubAccessScope:
+    return HubAccessScope(
+        session_namespace=session_namespace,
+        principal_service="hub-fixture",
+        allowed_operations=("store", "get", "describe"),
+        allowed_result_types=("ohlcv_bars",),
+    )
 
 
 class TestResultStore:
@@ -249,3 +259,76 @@ class TestResultStore:
                 )
             )
         assert schema_exc.value.code == HUB_SCHEMA_MISMATCH
+
+    async def test_explicit_scope_store_get_and_describe_work(self) -> None:
+        store = ResultStore(
+            _config(),
+            clock=_FakeClock(datetime(2026, 5, 16, tzinfo=UTC)),
+        )
+        scope = _scope("session-a")
+
+        descriptor = await store.store(scope, _request())
+        get_response = await store.get(
+            scope,
+            GetResultRequest(
+                protocol_version=1,
+                result_guid=descriptor.result_guid,
+                hub_service="gofr-agent",
+            ),
+        )
+        describe_response = await store.describe(
+            scope,
+            DescribeResultRequest(
+                protocol_version=1,
+                result_guid=descriptor.result_guid,
+                hub_service="gofr-agent",
+            ),
+        )
+
+        assert get_response.payload == [{"date": "2026-05-16", "close": 100.0}]
+        assert describe_response.metadata.result_guid == descriptor.result_guid
+
+    async def test_cross_session_lookup_returns_unknown_result(self) -> None:
+        store = ResultStore(
+            _config(),
+            clock=_FakeClock(datetime(2026, 5, 16, tzinfo=UTC)),
+        )
+        descriptor = await store.store(_scope("session-a"), _request())
+
+        with pytest.raises(HubError) as exc_info:
+            await store.get(
+                _scope("session-b"),
+                GetResultRequest(
+                    protocol_version=1,
+                    result_guid=descriptor.result_guid,
+                    hub_service="gofr-agent",
+                ),
+            )
+
+        assert exc_info.value.code == HUB_UNKNOWN_RESULT
+
+    async def test_capacity_is_enforced_per_session(self) -> None:
+        store = ResultStore(
+            _config(hub_max_results=1),
+            clock=_FakeClock(datetime(2026, 5, 16, tzinfo=UTC)),
+        )
+
+        await store.store(_scope("session-a"), _request(summary="one"))
+        await store.store(_scope("session-b"), _request(summary="two"))
+
+        with pytest.raises(HubError) as exc_info:
+            await store.store(_scope("session-a"), _request(summary="three"))
+
+        assert exc_info.value.code == HUB_CAPACITY_EXCEEDED
+
+    async def test_descriptor_remains_session_neutral_with_explicit_scope(self) -> None:
+        store = ResultStore(
+            _config(),
+            clock=_FakeClock(datetime(2026, 5, 16, tzinfo=UTC)),
+        )
+
+        descriptor = await store.store(_scope("session-a"), _request())
+        payload = descriptor.model_dump(exclude_none=True)
+
+        assert "session_id" not in payload
+        assert "session_namespace" not in payload

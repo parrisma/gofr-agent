@@ -12,6 +12,7 @@ from app import __version__
 from app.agent.agent import GofrAgent
 from app.agent.tool_factory import model_visible_tools
 from app.config import GofrAgentConfig
+from app.hub import HubResultStore, HubStoreHealth
 from app.logger import get_logger
 from app.request_context import request_log_fields
 from app.services.registry import ServiceRegistry
@@ -96,11 +97,40 @@ def _hub_config(config: GofrAgentConfig) -> dict[str, Any]:
     return {
         "enabled": config.hub_enabled,
         "hub_url_configured": bool(config.hub_url),
+        "store_backend": config.hub_store_backend,
+        "cache_url_configured": bool(config.hub_cache_url),
         "protocol_version": config.hub_protocol_version,
         "default_ttl_seconds": config.hub_default_ttl_seconds,
         "max_payload_bytes": config.hub_max_payload_bytes,
         "max_results": config.hub_max_results,
     }
+
+
+def _default_hub_store_health(config: GofrAgentConfig) -> HubStoreHealth:
+    reachable = config.hub_store_backend == "memory"
+    return HubStoreHealth(
+        backend=config.hub_store_backend,
+        status="healthy" if reachable else "failed",
+        reachable=reachable,
+    )
+
+
+def _hub_store_payload(
+    config: GofrAgentConfig,
+    hub_store_health: HubStoreHealth | None,
+) -> dict[str, Any]:
+    health = hub_store_health or _default_hub_store_health(config)
+    payload: dict[str, Any] = {
+        "backend": health.backend,
+        "status": health.status,
+        "reachable": health.reachable,
+    }
+    if health.indexed_result_count is not None:
+        payload["indexed_result_count"] = health.indexed_result_count
+    error = _bounded(health.error)
+    if error is not None:
+        payload["error"] = error
+    return payload
 
 
 def _config_payload(config: GofrAgentConfig) -> dict[str, Any]:
@@ -172,6 +202,7 @@ def build_health_payload(
     config: GofrAgentConfig,
     registry: ServiceRegistry,
     agent: GofrAgent,
+    hub_store_health: HubStoreHealth | None = None,
 ) -> dict[str, Any]:
     """Return authenticated health diagnostics without secret-bearing fields."""
     downstream = _downstream_summary(registry)
@@ -183,6 +214,7 @@ def build_health_payload(
         "timestamp": _timestamp(),
         "version": __version__,
         "config": _config_payload(config),
+        "hub_store": _hub_store_payload(config, hub_store_health),
         "downstream_services": downstream,
     }
 
@@ -191,9 +223,10 @@ def build_http_health_payload(
     config: GofrAgentConfig,
     registry: ServiceRegistry,
     agent: GofrAgent,
+    hub_store_health: HubStoreHealth | None = None,
 ) -> dict[str, Any]:
     """Return the compact unauthenticated HTTP health payload."""
-    detailed = build_health_payload(config, registry, agent)
+    detailed = build_health_payload(config, registry, agent, hub_store_health)
     downstream = detailed["downstream_services"]
     return {
         "status": detailed["status"],
@@ -201,6 +234,7 @@ def build_http_health_payload(
         "timestamp": detailed["timestamp"],
         "version": detailed["version"],
         "message": detailed["message"],
+        "hub_store": detailed["hub_store"],
         "downstream": {
             "total": downstream["total"],
             "healthy": downstream["healthy"],
@@ -225,6 +259,7 @@ def create_health_routes(
     config: GofrAgentConfig,
     registry: ServiceRegistry,
     agent: GofrAgent,
+    result_store: HubResultStore,
 ) -> list[Route]:
     """Create unauthenticated Starlette routes for `/ping` and `/health`."""
 
@@ -233,7 +268,12 @@ def create_health_routes(
 
     async def health(_request: object) -> JSONResponse:
         try:
-            payload = build_http_health_payload(config, registry, agent)
+            payload = build_http_health_payload(
+                config,
+                registry,
+                agent,
+                await result_store.health(),
+            )
         except Exception as exc:
             logger.error(
                 "HTTP health payload construction failed",

@@ -33,6 +33,9 @@ tools from its connected downstream services and returns a grounded answer.
 For the latest implementation status across reasoning events, results hub,
 prompt hardening, CLI behavior, fixture chat, validation evidence, and caveats,
 see [docs/current_state.md](docs/current_state.md).
+For a system-level walkthrough of runtime components, request flow, results-hub
+interactions, and deployment topology, see
+[docs/architecture_overview.md](docs/architecture_overview.md).
 For the current auth, transport, downstream delegation, results-hub, and
 prompt-hardening posture, see [docs/security_model.md](docs/security_model.md).
 
@@ -46,6 +49,9 @@ Client (Claude / mcpo / CLI)
         ▼
   ┌─────────────────────────┐
   │       gofr-agent        │
+        In this VS Code dev-container plus Docker-socket workflow, the Compose-managed
+        agent containers use image-copied source rather than a live repo bind mount.
+        After editing source files, rebuild the profile you are running. If you need
   │  FastMCP  ←→  GofrAgent │   pydantic-ai reasoning
   └──────┬──────────────────┘
          │  MCP (per service pool)
@@ -98,41 +104,102 @@ The server listens on **port 8090** by default.
 
 ## Local UI workflow
 
-For local UI testing against the real `app.main_mcp` server plus the Docker
-fixture MCP services, use the helper scripts instead of starting pieces by
-hand:
+For local UI testing against the real `app.main_mcp` server plus Valkey and the
+fixture MCP services, use the unified Compose stack.
 
 ```bash
-# 1. Start the fixture MCP services and write tmp/fixture-services.yml
-./scripts/start-test-mcp-services.sh
+# 1. Dedicated runtime container: agent + Valkey + fixtures
+docker compose -f docker/compose.dev.yml --profile runtime up -d --build
 
-# 2. Start the real MCP server with the generated manifest
-./scripts/start-real-server.sh \
-  --model openai:deepseek/deepseek-v4-pro \
-  --services-file /home/gofr/devroot/gofr-agent/tmp/fixture-services.yml \
-  --openrouter-api-key sk-or-...
+# 2. Check health from the dev container
+curl -s http://gofr-agent-dev:8090/health | python -m json.tool
 ```
 
-If you do not want the API key in shell history, prefer the environment
-variable form:
+To run the stack with a live model instead of the default `test` model:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... \
+GOFR_AGENT_LLM_MODEL=openai:deepseek/deepseek-v4-pro \
+docker compose -f docker/compose.dev.yml --profile runtime up -d --build
+```
+
+In this VS Code dev-container plus Docker-socket workflow, the Compose-managed
+agent containers use image-copied source rather than a live repo bind mount.
+After editing source files, rebuild the profile you are running. If you need
+live edits from the current dev container, use `./scripts/start-test-mcp-services.sh`
+plus a manual local `./scripts/start-real-server.sh` run instead.
+
+If you want an interactive container instead of the dedicated runtime service,
+use the `workspace` profile and start the agent manually inside it:
+
+```bash
+docker compose -f docker/compose.dev.yml --profile workspace up -d --build
+docker compose -f docker/compose.dev.yml exec gofr-agent-workspace \
+  ./scripts/start-real-server.sh \
+  --services-file /home/gofr/devroot/gofr-agent/docker/services.compose.dev.yml \
+  --hub-store-backend external_cache \
+  --hub-cache-url redis://gofr-agent-valkey:6379/0 \
+  --hub-url http://gofr-agent-dev:8090/mcp
+```
+
+To run the ask CLI from a disposable container on the same network:
+
+```bash
+./scripts/ask-docker.sh "List the registered services by name."
+```
+
+That wrapper builds `docker/Dockerfile.cli` on first use, joins
+`gofr-dev-net`, and points the CLI at `http://gofr-agent-dev:8090/mcp` with
+token `dev-admin-token` by default. Override `GOFR_AGENT_CLI_URL`,
+`GOFR_AGENT_CLI_TOKEN`, or `GOFR_AGENT_CLI_NETWORK` when needed.
+
+For manual current-dev-container workflows, `./scripts/start-test-mcp-services.sh`
+still starts Valkey + the fixture services and writes `tmp/fixture-services.yml`.
+That helper also connects the current dev container to `gofr-dev-net` as
+`gofr-agent-manual`, so manual `./scripts/start-real-server.sh` runs should use
+`--hub-url http://gofr-agent-manual:8090/mcp`.
+
+For a deterministic manual test stack in the current dev container, use this
+end-to-end flow:
+
+```bash
+# 1. Start Valkey + the fixture MCP services and write tmp/fixture-services.yml
+./scripts/start-test-mcp-services.sh
+
+# 2. In a second shell, start the real agent against that manifest
+./scripts/start-real-server.sh \
+  --llm-model test \
+  --services-file /home/gofr/devroot/gofr-agent/tmp/fixture-services.yml \
+  --hub-url http://gofr-agent-manual:8090/mcp
+
+# 3. From a third shell, run a CLI smoke test through the disposable ask wrapper
+GOFR_AGENT_CLI_URL=http://gofr-agent-manual:8090/mcp \
+./scripts/ask-docker.sh --quiet "List the registered services by name."
+```
+
+Step 3 uses `GOFR_AGENT_CLI_URL=http://gofr-agent-manual:8090/mcp` because the
+manual server is running in the current dev container, not in the compose
+runtime service whose default host is `gofr-agent-dev`.
+
+The `test` model is useful for a transport and wiring smoke test only. It
+returns raw tool payload maps rather than a polished natural-language answer.
+If you want the same fixture stack with a human-readable CLI response, restart
+step 2 with a real model and API key, for example:
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... \
 ./scripts/start-real-server.sh \
-  --model openai:deepseek/deepseek-v4-pro \
-  --services-file /home/gofr/devroot/gofr-agent/tmp/fixture-services.yml
+  --llm-model openai:deepseek/deepseek-v4-pro \
+  --services-file /home/gofr/devroot/gofr-agent/tmp/fixture-services.yml \
+  --hub-url http://gofr-agent-manual:8090/mcp
 ```
 
-The helper binds the real MCP server to `0.0.0.0:8090`, enables the built-in
-results hub by default for this dev flow, and advertises
-`http://gofr-agent-dev:8090/mcp` unless you override it with `--hub-url`,
-`--hub-host`, `--hub-port`, or `--hub-disabled`. For local UI MCP requests use
-the bearer token `dev-admin-token`.
+For local UI MCP requests use the bearer token `dev-admin-token`.
 
+- `docker/services.compose.dev.yml` is the checked-in manifest used by the Compose runtime service.
+- `./scripts/start-real-server.sh` still supports manual runs and will auto-select `docker/services.compose.dev.yml` when `tmp/fixture-services.yml` is absent.
 - `./scripts/start-real-server.sh` starts the MCP server on port `8090`; it does not start the mcpo proxy on `8091`.
 - `--no-services` overrides `--services-file` and starts the server with zero downstream services.
-- If `tmp/fixture-services.yml` already exists, `./scripts/start-real-server.sh` will auto-select it when `--services-file` is omitted.
-- `./scripts/start-real-server.sh` now exposes explicit hub flags: `--hub-enabled`, `--hub-disabled`, `--hub-url`, `--hub-host`, and `--hub-port`.
 
 ---
 
@@ -321,6 +388,10 @@ gofr-agent exposes these tools over MCP:
   "provenance": []
 }
 ```
+  Implementation note: in the current VS Code dev-container plus Docker-socket
+  workflow, the Docker daemon does not see `/home/gofr/devroot/gofr-agent` as the
+  real workspace path. The Compose-managed agent services therefore need a
+  self-contained image with the repo copied in, not a repo bind mount.
 
 `steps` is derived from the same live reasoning event stream sent over MCP
 logging notifications. Tool-using runs and summary-compaction runs produce
@@ -338,40 +409,48 @@ clarification summaries from the JSON payload when available.
 
 ## CLI
 
+The recommended CLI entrypoint for the compose dev stack is
+`./scripts/ask-docker.sh`. That script is a thin wrapper around
+`python -m app.cli.ask`: it builds `docker/Dockerfile.cli` on first use,
+starts a disposable container on `gofr-dev-net`, sets `GOFR_AGENT_URL` and
+`GOFR_AGENT_TOKEN`, then forwards every CLI argument to `app.cli.ask`.
+
 ```bash
 # Ask a question (auto-generates a session ID)
-uv run python -m app.cli.ask "What is the capital of France?"
+./scripts/ask-docker.sh "What is the capital of France?"
 
 # Continue a conversation
-uv run python -m app.cli.ask --session abc-123 "What about Germany?"
+./scripts/ask-docker.sh --session abc-123 "What about Germany?"
 
 # Final answer only
-uv run python -m app.cli.ask --quiet "What is the capital of France?"
+./scripts/ask-docker.sh --quiet "What is the capital of France?"
 
 # Verbose reasoning trace with tool arguments and summaries
-uv run python -m app.cli.ask --verbose "What is the capital of France?"
+./scripts/ask-docker.sh --verbose "What is the capital of France?"
 
 # Emit JSON with both streamed events and the final response
-uv run python -m app.cli.ask --format json "What is the capital of France?"
+./scripts/ask-docker.sh --format json "What is the capital of France?"
 
 # Human-in-the-loop prompt/resume in text mode
-uv run python -m app.cli.ask --interactive "Compute volatility"
+./scripts/ask-docker.sh --interactive "Compute volatility"
 
 # Human-in-the-loop in JSON mode for scripts; prints waiting_for_user and exits
-uv run python -m app.cli.ask --interactive --format json "Compute volatility"
+./scripts/ask-docker.sh --interactive --format json "Compute volatility"
 
 # Structured prompt-hardening controls
-uv run python -m app.cli.ask \
+./scripts/ask-docker.sh \
   --instructions "Return compact JSON only" \
   --forbidden-service trades \
   --tools-only \
   "What is the exchange code for AAPL?"
 
 # Reset a session
-uv run python -m app.cli.ask --reset abc-123
+./scripts/ask-docker.sh --reset abc-123
 
-# Point at a custom server
-uv run python -m app.cli.ask --url http://myserver:8090/mcp "Hello"
+# Point at a custom server or token
+GOFR_AGENT_CLI_URL=http://myserver:8090/mcp \
+GOFR_AGENT_CLI_TOKEN=dev-admin-token \
+./scripts/ask-docker.sh "Hello"
 ```
 
 Default CLI mode renders compact reasoning events when the server emits them,
@@ -380,6 +459,24 @@ then prints the final answer. `--quiet` suppresses event output and metadata.
 tool-result summaries. `--format json` prints `{"events": [...], "response": {...}}`.
 The CLI consumes MCP `notifications/message` log events and filters for the
 `gofr-agent.reasoning` payloads.
+
+If you are already inside a prepared Python environment, `./scripts/ask-docker.sh`
+and `uv run python -m app.cli.ask` reach the same CLI implementation. The
+wrapper is recommended here because it matches the compose dev topology and
+does not depend on the caller's local Python environment.
+
+When you are using the manual fixture test stack started with
+`./scripts/start-test-mcp-services.sh` plus a local
+`./scripts/start-real-server.sh` process, remember to override the CLI target:
+
+```bash
+GOFR_AGENT_CLI_URL=http://gofr-agent-manual:8090/mcp \
+./scripts/ask-docker.sh --quiet "List the registered services by name."
+```
+
+With `--llm-model test`, treat that command as a connectivity smoke test. For a
+useful natural-language answer, point the CLI at a server started with a real
+model instead.
 
 Human-in-the-loop support is Phase 1A: deterministic missing-field prompts can
 pause before the LLM run starts. The server must enable structured
@@ -403,20 +500,20 @@ Human-in-the-loop examples:
 ```bash
 # 1. Text mode: ask an underspecified question, answer the CLI prompt, then
 #    receive the resumed final answer.
-uv run python -m app.cli.ask --interactive "Compute volatility"
+./scripts/ask-docker.sh --interactive "Compute volatility"
 # Example prompt: Please provide the missing field(s): ticker, date_range, window.
 # Example answer typed at the prompt: AAPL, 2026-01-01 to 2026-05-17, 30 days
 
 # 2. JSON mode: useful for scripts and UIs. The CLI does not prompt; it returns
 #    response.status == "waiting_for_user" plus session_id and prompt_id.
-uv run python -m app.cli.ask \
+./scripts/ask-docker.sh \
   --interactive \
   --format json \
   "Compute volatility"
 
 # 3. Named session with constraints: the pending prompt, answer, and resumed run
 #    stay tied to the same session.
-uv run python -m app.cli.ask \
+./scripts/ask-docker.sh \
   --session risk-demo \
   --interactive \
   --tools-only \

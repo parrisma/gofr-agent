@@ -9,11 +9,15 @@ from __future__ import annotations
 import os
 from ipaddress import ip_address
 from pathlib import Path
+from typing import Literal, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 DEFAULT_MCP_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+DEFAULT_HUB_STORE_BACKEND = "memory"
+HubStoreBackend = Literal["memory", "external_cache"]
+_HUB_STORE_BACKENDS: tuple[HubStoreBackend, ...] = ("memory", "external_cache")
 
 
 class GofrAgentConfig(BaseModel):
@@ -65,6 +69,19 @@ class GofrAgentConfig(BaseModel):
     allowed_models: list[str] = Field(default_factory=list)
     hub_enabled: bool = False
     hub_url: str | None = None
+    hub_store_backend: HubStoreBackend = DEFAULT_HUB_STORE_BACKEND
+    hub_cache_url: str | None = None
+    hub_cache_connect_timeout_seconds: float = Field(default=1.0, gt=0)
+    hub_cache_operation_timeout_seconds: float = Field(default=2.0, gt=0)
+    hub_cache_max_attempts: int = Field(default=2, ge=1)
+    hub_cache_retry_backoff_seconds: float = Field(default=0.2, ge=0)
+    hub_cache_request_budget_seconds: float = Field(default=5.0, gt=0)
+    hub_cache_key_prefix: str = Field(default="gofr-agent:hub", min_length=1)
+    hub_cache_memory_budget_bytes: int = Field(default=268435456, ge=1)
+    hub_cache_active_session_budget: int = Field(default=20, ge=1)
+    hub_callback_token_ttl_seconds: int = Field(default=600, ge=1)
+    hub_callback_token_secret: str | None = None
+    hub_cache_healthcheck_interval_seconds: int = Field(default=30, ge=1)
     hub_default_ttl_seconds: int = Field(default=3600, ge=1)
     hub_max_payload_bytes: int = Field(default=524288, ge=1)
     hub_max_results: int = Field(default=256, ge=1)
@@ -91,8 +108,23 @@ class GofrAgentConfig(BaseModel):
     def _validate_http_origins(cls, origins: list[str]) -> list[str]:
         return [_validate_http_origin(origin) for origin in origins]
 
+    @field_validator("hub_cache_key_prefix")
+    @classmethod
+    def _validate_hub_cache_key_prefix(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("hub_cache_key_prefix must not be empty")
+        if any(char.isspace() for char in cleaned):
+            raise ValueError("hub_cache_key_prefix must not contain whitespace")
+        return cleaned
+
     @model_validator(mode="after")
     def _validate_hub_settings(self) -> GofrAgentConfig:
+        if self.hub_store_backend == "external_cache" and not self.hub_cache_url:
+            raise ValueError(
+                "hub_cache_url must be set when hub_store_backend is external_cache"
+            )
+
         if not self.hub_enabled:
             return self
 
@@ -186,6 +218,40 @@ class GofrAgentConfig(BaseModel):
             allowed_models=_get_list("ALLOWED_MODELS"),
             hub_enabled=_get_bool("HUB_ENABLED", False),
             hub_url=_get("HUB_URL") or None,
+            hub_store_backend=_parse_hub_store_backend(
+                _get(
+                    "HUB_STORE_BACKEND",
+                    DEFAULT_HUB_STORE_BACKEND,
+                )
+            ),
+            hub_cache_url=_get("HUB_CACHE_URL") or None,
+            hub_cache_connect_timeout_seconds=float(
+                _get("HUB_CACHE_CONNECT_TIMEOUT_SECONDS", "1")
+            ),
+            hub_cache_operation_timeout_seconds=float(
+                _get("HUB_CACHE_OPERATION_TIMEOUT_SECONDS", "2")
+            ),
+            hub_cache_max_attempts=int(_get("HUB_CACHE_MAX_ATTEMPTS", "2")),
+            hub_cache_retry_backoff_seconds=float(
+                _get("HUB_CACHE_RETRY_BACKOFF_SECONDS", "0.2")
+            ),
+            hub_cache_request_budget_seconds=float(
+                _get("HUB_CACHE_REQUEST_BUDGET_SECONDS", "5")
+            ),
+            hub_cache_key_prefix=_get("HUB_CACHE_KEY_PREFIX", "gofr-agent:hub"),
+            hub_cache_memory_budget_bytes=int(
+                _get("HUB_CACHE_MEMORY_BUDGET_BYTES", "268435456")
+            ),
+            hub_cache_active_session_budget=int(
+                _get("HUB_CACHE_ACTIVE_SESSION_BUDGET", "20")
+            ),
+            hub_callback_token_ttl_seconds=int(
+                _get("HUB_CALLBACK_TOKEN_TTL_SECONDS", "600")
+            ),
+            hub_callback_token_secret=_get("HUB_CALLBACK_TOKEN_SECRET") or None,
+            hub_cache_healthcheck_interval_seconds=int(
+                _get("HUB_CACHE_HEALTHCHECK_INTERVAL_SECONDS", "30")
+            ),
             hub_default_ttl_seconds=int(_get("HUB_DEFAULT_TTL_SECONDS", "3600")),
             hub_max_payload_bytes=int(_get("HUB_MAX_PAYLOAD_BYTES", "524288")),
             hub_max_results=int(_get("HUB_MAX_RESULTS", "256")),
@@ -245,3 +311,12 @@ def _validate_http_origin(value: str) -> str:
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
         raise ValueError("origin allow-list entries must not include paths or query strings")
     return origin.rstrip("/")
+
+
+def _parse_hub_store_backend(value: str) -> HubStoreBackend:
+    backend = value.strip()
+    if backend not in _HUB_STORE_BACKENDS:
+        raise ValueError(
+            "hub_store_backend must be one of: " + ", ".join(_HUB_STORE_BACKENDS)
+        )
+    return cast(HubStoreBackend, backend)

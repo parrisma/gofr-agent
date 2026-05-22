@@ -16,9 +16,18 @@ from app.agent.contracts import IntentConstraints
 from app.agent.deps import AgentDeps
 from app.agent.tool_factory import make_tool, model_visible_tools, truncate_result
 from app.auth.permissions import downstream_activity
+from app.hub.auth import (
+    GOFR_HUB_CALLBACK_TOKEN_HEADER,
+    GOFR_HUB_URL_HEADER,
+    derive_session_namespace,
+    validate_hub_callback_token,
+)
 from app.services.discovery import MCPToolInfo
 from app.services.pool import SessionPool
+from app.services.registry import ServiceHubCapabilities
 from tests.helpers.dummy_auth_service import DummyAuthService
+
+_TEST_HUB_SECRET = "unit-hub-secret"  # pragma: allowlist secret
 
 
 def _make_info(
@@ -40,9 +49,14 @@ def _make_info(
 
 def _make_pool_with_session(session: MagicMock) -> MagicMock:
     pool = MagicMock(spec=SessionPool)
+    pool.captured_extra_headers = None
 
     @asynccontextmanager
-    async def _open_user_session(token: str) -> AsyncIterator[MagicMock]:
+    async def _open_user_session(
+        token: str,
+        extra_headers: dict[str, str] | None = None,
+    ) -> AsyncIterator[MagicMock]:
+        pool.captured_extra_headers = extra_headers
         yield session
 
     pool.open_user_session = _open_user_session
@@ -142,6 +156,54 @@ class TestMakeTool:
         assert "system:" not in tool.description
         assert "ignore previous instructions" not in tool.description
         assert "[filtered metadata]" in tool.description
+
+    async def test_hub_capable_tool_injects_signed_hub_headers(self) -> None:
+        session = MagicMock()
+        session.call_tool = AsyncMock(
+            return_value=MagicMock(
+                content=[TextContent(type="text", text='{"ok": true}')],
+                structured_content=None,
+            )
+        )
+        pool = _make_pool_with_session(session)
+        info = _make_info(name="simple_return", service_name="analytics")
+        tool = make_tool(
+            pool,
+            info,
+            DummyAuthService(),
+            hub_url="http://gofr-agent:8090/mcp",
+            hub_callback_token_secret=_TEST_HUB_SECRET,
+            hub_callback_token_ttl_seconds=60,
+            hub_capabilities=ServiceHubCapabilities(
+                supports_results_hub=True,
+                can_consume_results=True,
+                result_types=("ohlcv_bars",),
+            ),
+        )
+        deps = AgentDeps(
+            token="dev-admin-token",
+            request_id="request-123",
+            session_id="session-123",
+        )
+
+        output = await tool.function(_ctx_with_deps(deps), ticker="MSFT")
+
+        assert _unwrap_tool_payload(output)["ok"] is True
+        headers = pool.captured_extra_headers
+        assert headers[GOFR_HUB_URL_HEADER] == "http://gofr-agent:8090/mcp"
+
+        claims = validate_hub_callback_token(
+            headers[GOFR_HUB_CALLBACK_TOKEN_HEADER],
+            _TEST_HUB_SECRET,
+            required_operation="get",
+        )
+        assert claims.service == "analytics"
+        assert claims.request_id == "request-123"
+        assert claims.session_namespace == derive_session_namespace(
+            _TEST_HUB_SECRET,
+            "session-123",
+        )
+        assert claims.ops == ("get", "describe")
 
     def test_tool_max_retries_matches_retry_attempts(self) -> None:
         info = _make_info()

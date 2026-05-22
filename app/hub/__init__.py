@@ -22,8 +22,10 @@ from app.hub.models import (
 )
 
 if TYPE_CHECKING:
-    from app.hub.auth import ServicePrincipal
+    from app.hub.auth import ServicePrincipal, resolve_service_principal
     from app.hub.store import ResultStore
+    from app.hub.store_factory import create_result_store
+    from app.hub.store_types import HubAccessScope, HubResultStore, HubStoreHealth
 
 
 def __getattr__(name: str) -> Any:
@@ -31,6 +33,18 @@ def __getattr__(name: str) -> Any:
         from app.hub.store import ResultStore
 
         return ResultStore
+    if name == "create_result_store":
+        from app.hub.store_factory import create_result_store
+
+        return create_result_store
+    if name in {"HubAccessScope", "HubResultStore", "HubStoreHealth"}:
+        from app.hub.store_types import HubAccessScope, HubResultStore, HubStoreHealth
+
+        return {
+            "HubAccessScope": HubAccessScope,
+            "HubResultStore": HubResultStore,
+            "HubStoreHealth": HubStoreHealth,
+        }[name]
     if name in {"ServicePrincipal", "resolve_service_principal"}:
         from app.hub.auth import ServicePrincipal, resolve_service_principal
 
@@ -47,6 +61,9 @@ __all__ = [
     "GET_RESULT_TOOL",
     "GetResultRequest",
     "GetResultResponse",
+    "HubAccessScope",
+    "HubResultStore",
+    "HubStoreHealth",
     "RegisterResultsHubRequest",
     "RegisterResultsHubResponse",
     "REGISTER_RESULTS_HUB_TOOL",
@@ -57,5 +74,6 @@ __all__ = [
     "STORE_RESULT_TOOL",
     "StoreResultRequest",
     "StoreResultResponse",
+    "create_result_store",
     "resolve_service_principal",
 ]

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import importlib
 import json
 import os
 import socket
+from typing import Any
 
 import httpx
 import pytest
@@ -18,13 +18,19 @@ from mcp.client.streamable_http import streamable_http_client
 from app.agent.agent import GofrAgent
 from app.auth.permissions import AGENT_HUB_FETCH, AGENT_HUB_STORE
 from app.config import GofrAgentConfig
+from app.hub.auth import (
+    GOFR_HUB_CALLBACK_TOKEN_HEADER,
+    GOFR_HUB_URL_HEADER,
+    mint_hub_callback_token,
+)
+from app.hub.store_factory import create_result_store
+from app.hub.store_types import HubResultStore
 from app.mcp_server.mcp_server import create_mcp_server
 from app.services import ServiceConfig, ServicesManifest
 from app.services.registry import ServiceRegistry
 from app.sessions.store import SessionStore
 from app.transport_security import apply_transport_security
 from tests.fixtures.mcp_services import analytics, instruments
-from tests.fixtures.mcp_services._results_hub import GOFR_FIXTURES_HUB_CALLBACK_TOKEN
 from tests.fixtures.mcp_services._server import _UvicornThread, make_service_server
 from tests.helpers.dummy_auth_service import DummyAuthService
 from tests.integration.conftest import AUTH_HEADERS
@@ -36,6 +42,13 @@ _INSTRUMENTS_TOKEN = "fixture-outbound-token"
 _ANALYTICS_TOKEN = "analytics-outbound-token"
 _PRODUCER_CALLBACK_TOKEN = "dev-instruments-hub-token"
 _CONSUMER_CALLBACK_TOKEN = "dev-analytics-hub-token"
+_HUB_CALLBACK_TOKEN_SECRET = "integration-hub-secret"  # pragma: allowlist secret
+_SESSION_NAMESPACE = "analytics-session"
+_DEFAULT_EXTERNAL_CACHE_URL = "redis://gofr-agent-valkey:6379/15"
+
+
+def _external_cache_url() -> str:
+    return os.getenv("GOFR_AGENT_TEST_HUB_CACHE_URL", _DEFAULT_EXTERNAL_CACHE_URL)
 
 
 def _public_host() -> str:
@@ -48,9 +61,6 @@ def _allow_host(mcp_app, public_host: str) -> None:  # type: ignore[no-untyped-d
         GofrAgentConfig(
             mcp_allowed_hosts=[
                 f"{public_host}:*",
-                "127.0.0.1:*",
-                "localhost:*",
-                "[::1]:*",
             ]
         ),
     )
@@ -61,6 +71,24 @@ class _HubAuthService(DummyAuthService):
         if token in {_PRODUCER_CALLBACK_TOKEN, _CONSUMER_CALLBACK_TOKEN}:
             return f"{AGENT_HUB_STORE},{AGENT_HUB_FETCH}"
         return super().authorised_activities(token)
+
+
+def _signed_hub_token(
+    *,
+    service: str,
+    session_namespace: str,
+    allowed_operations: tuple[str, ...],
+    allowed_result_types: tuple[str, ...] = ("ohlcv_bars",),
+    ttl_seconds: int = 300,
+) -> str:
+    return mint_hub_callback_token(
+        secret=_HUB_CALLBACK_TOKEN_SECRET,
+        service=service,
+        session_namespace=session_namespace,
+        allowed_operations=allowed_operations,
+        allowed_result_types=allowed_result_types,
+        ttl_seconds=ttl_seconds,
+    )
 
 
 async def _call_tool(
@@ -94,22 +122,6 @@ async def _wait_for_hub(url: str) -> None:
     raise RuntimeError(f"Hub did not become reachable at {url}")
 
 
-@contextlib.contextmanager
-def _hub_callback_token(token: str | None):
-    previous = os.environ.get(GOFR_FIXTURES_HUB_CALLBACK_TOKEN)
-    if token is None:
-        os.environ.pop(GOFR_FIXTURES_HUB_CALLBACK_TOKEN, None)
-    else:
-        os.environ[GOFR_FIXTURES_HUB_CALLBACK_TOKEN] = token
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(GOFR_FIXTURES_HUB_CALLBACK_TOKEN, None)
-        else:
-            os.environ[GOFR_FIXTURES_HUB_CALLBACK_TOKEN] = previous
-
-
 class _AnalyticsHubStack:
     def __init__(
         self,
@@ -118,11 +130,13 @@ class _AnalyticsHubStack:
         instruments_module,
         registry: ServiceRegistry,
         agent_thread: _UvicornThread,
+        result_store: HubResultStore,
     ) -> None:
         self.analytics_module = analytics_module
         self.instruments_module = instruments_module
         self.registry = registry
         self.agent_thread = agent_thread
+        self.result_store = result_store
         self.analytics_thread: _UvicornThread | None = None
         self.instruments_thread: _UvicornThread | None = None
         self.analytics_url = ""
@@ -134,6 +148,7 @@ class _AnalyticsHubStack:
         await self.registry.shutdown()
         self.agent_thread.shutdown()
         self.agent_thread.join(timeout=5)
+        await self.result_store.stop()
         if self.analytics_thread is not None:
             self.analytics_thread.shutdown()
             self.analytics_thread.join(timeout=5)
@@ -144,33 +159,40 @@ class _AnalyticsHubStack:
         self.instruments_module.reset_results_hub_state()
 
 
-async def _start_stack() -> _AnalyticsHubStack:
+async def _start_stack(**config_overrides: Any) -> _AnalyticsHubStack:
     public_host = _public_host()
     agent_port = _free_port()
     hub_url = f"http://{public_host}:{agent_port}/mcp"
-    local_hub_url = f"http://127.0.0.1:{agent_port}/mcp"
 
     instruments_module = importlib.reload(instruments)
     analytics_module = importlib.reload(analytics)
     instruments_module.reset_results_hub_state()
     analytics_module.reset_results_hub_state()
-    instruments_module.configure_results_hub_auth(_PRODUCER_CALLBACK_TOKEN)
-    analytics_module.configure_results_hub_auth(_CONSUMER_CALLBACK_TOKEN)
+    instruments_module.configure_results_hub_auth(None)
+    analytics_module.configure_results_hub_auth(None)
 
     instruments_host, instruments_port, instruments_thread = make_service_server(
         instruments_module.mcp
     )
     analytics_host, analytics_port, analytics_thread = make_service_server(analytics_module.mcp)
 
-    config = GofrAgentConfig(
-        llm_model="test",
-        session_pool_size=4,
-        hub_enabled=True,
-        hub_url=hub_url,
-        hub_default_ttl_seconds=30,
-        hub_max_payload_bytes=65536,
-        hub_max_results=32,
-    )
+    config_kwargs: dict[str, Any] = {
+        "llm_model": "test",
+        "session_pool_size": 4,
+        "hub_enabled": True,
+        "hub_url": hub_url,
+        "hub_default_ttl_seconds": 30,
+        "hub_max_payload_bytes": 65536,
+        "hub_max_results": 32,
+        "hub_callback_token_secret": _HUB_CALLBACK_TOKEN_SECRET,
+    }
+    config_kwargs.update(config_overrides)
+    if (
+        config_kwargs.get("hub_store_backend") == "external_cache"
+        and not config_kwargs.get("hub_cache_url")
+    ):
+        config_kwargs["hub_cache_url"] = _external_cache_url()
+    config = GofrAgentConfig(**config_kwargs)
     registry = ServiceRegistry(config)
     await registry.load_manifest(
         ServicesManifest(
@@ -190,12 +212,21 @@ async def _start_stack() -> _AnalyticsHubStack:
             ]
         )
     )
+    result_store = create_result_store(config)
+    await result_store.start()
 
     auth_service = _HubAuthService()
     agent = GofrAgent(config, registry, auth_service)
     agent.build()
     session_store = SessionStore(ttl_minutes=60)
-    mcp = create_mcp_server(config, registry, agent, session_store, auth_service)
+    mcp = create_mcp_server(
+        config,
+        registry,
+        agent,
+        session_store,
+        auth_service,
+        result_store,
+    )
     _allow_host(mcp, public_host)
     agent_app = AuthHeaderMiddleware(mcp.streamable_http_app())
     agent_thread = _UvicornThread(agent_app, "0.0.0.0", agent_port)
@@ -208,30 +239,39 @@ async def _start_stack() -> _AnalyticsHubStack:
         instruments_module=instruments_module,
         registry=registry,
         agent_thread=agent_thread,
+        result_store=result_store,
     )
     stack.analytics_thread = analytics_thread
     stack.instruments_thread = instruments_thread
     stack.analytics_url = f"http://{analytics_host}:{analytics_port}/mcp"
     stack.instruments_url = f"http://{instruments_host}:{instruments_port}/mcp"
     stack.hub_url = hub_url
-    stack.local_hub_url = local_hub_url
+    stack.local_hub_url = hub_url
     return stack
 
 
 async def _get_descriptor(stack: _AnalyticsHubStack) -> dict:
-    with _hub_callback_token(_PRODUCER_CALLBACK_TOKEN):
-        is_error, raw = await _call_tool(
-            stack.instruments_url,
-            "get_ohlcv_history",
-            {"ticker": "MSFT", "from_date": "2026-02-01", "to_date": "2026-02-28"},
-            headers=AUTH_HEADERS,
-        )
+    is_error, raw = await _call_tool(
+        stack.instruments_url,
+        "get_ohlcv_history",
+        {"ticker": "MSFT", "from_date": "2026-02-01", "to_date": "2026-02-28"},
+        headers=_fixture_hub_headers(
+            stack,
+            service=_INSTRUMENTS_SERVICE,
+            session_namespace=_SESSION_NAMESPACE,
+            allowed_operations=("store",),
+        ),
+    )
     assert is_error is False, raw
     return json.loads(raw)
 
 
 async def _get_payload_from_hub(stack: _AnalyticsHubStack, descriptor: dict) -> list[dict]:
-    headers = {"Authorization": f"Bearer {_CONSUMER_CALLBACK_TOKEN}"}
+    headers = _local_hub_headers(
+        service=_ANALYTICS_SERVICE,
+        session_namespace=_SESSION_NAMESPACE,
+        allowed_operations=("get",),
+    )
     is_error, raw = await _call_tool(
         stack.local_hub_url,
         "_get_result",
@@ -248,6 +288,40 @@ async def _get_payload_from_hub(stack: _AnalyticsHubStack, descriptor: dict) -> 
     return json.loads(raw)["payload"]
 
 
+def _local_hub_headers(
+    *,
+    service: str,
+    session_namespace: str,
+    allowed_operations: tuple[str, ...],
+) -> dict[str, str]:
+    return {
+        "Authorization": "Bearer "
+        + _signed_hub_token(
+            service=service,
+            session_namespace=session_namespace,
+            allowed_operations=allowed_operations,
+        )
+    }
+
+
+def _fixture_hub_headers(
+    stack: _AnalyticsHubStack,
+    *,
+    service: str,
+    session_namespace: str,
+    allowed_operations: tuple[str, ...],
+) -> dict[str, str]:
+    return {
+        **AUTH_HEADERS,
+        GOFR_HUB_URL_HEADER: stack.hub_url,
+        GOFR_HUB_CALLBACK_TOKEN_HEADER: _signed_hub_token(
+            service=service,
+            session_namespace=session_namespace,
+            allowed_operations=allowed_operations,
+        ),
+    }
+
+
 @pytest.mark.asyncio
 class TestAnalyticsHubIntegration:
     async def test_simple_return_accepts_bars_ref_and_matches_inline(self) -> None:
@@ -257,13 +331,17 @@ class TestAnalyticsHubIntegration:
             descriptor = await _get_descriptor(stack)
             payload = await _get_payload_from_hub(stack, descriptor)
 
-            with _hub_callback_token(_CONSUMER_CALLBACK_TOKEN):
-                descriptor_error, descriptor_raw = await _call_tool(
-                    stack.analytics_url,
-                    "simple_return",
-                    {"ticker": "MSFT", "bars_ref": descriptor},
-                    headers=AUTH_HEADERS,
-                )
+            descriptor_error, descriptor_raw = await _call_tool(
+                stack.analytics_url,
+                "simple_return",
+                {"ticker": "MSFT", "bars_ref": descriptor},
+                headers=_fixture_hub_headers(
+                    stack,
+                    service=_ANALYTICS_SERVICE,
+                    session_namespace=_SESSION_NAMESPACE,
+                    allowed_operations=("get", "describe"),
+                ),
+            )
             inline_error, inline_raw = await _call_tool(
                 stack.analytics_url,
                 "simple_return",
@@ -283,19 +361,24 @@ class TestAnalyticsHubIntegration:
         try:
             descriptor = await _get_descriptor(stack)
 
-            with _hub_callback_token(_CONSUMER_CALLBACK_TOKEN):
-                vol_error, vol_raw = await _call_tool(
-                    stack.analytics_url,
-                    "historical_volatility",
-                    {"ticker": "MSFT", "bars_ref": descriptor, "window": 5},
-                    headers=AUTH_HEADERS,
-                )
-                dd_error, dd_raw = await _call_tool(
-                    stack.analytics_url,
-                    "max_drawdown",
-                    {"ticker": "MSFT", "bars_ref": descriptor},
-                    headers=AUTH_HEADERS,
-                )
+            hub_headers = _fixture_hub_headers(
+                stack,
+                service=_ANALYTICS_SERVICE,
+                session_namespace=_SESSION_NAMESPACE,
+                allowed_operations=("get", "describe"),
+            )
+            vol_error, vol_raw = await _call_tool(
+                stack.analytics_url,
+                "historical_volatility",
+                {"ticker": "MSFT", "bars_ref": descriptor, "window": 5},
+                headers=hub_headers,
+            )
+            dd_error, dd_raw = await _call_tool(
+                stack.analytics_url,
+                "max_drawdown",
+                {"ticker": "MSFT", "bars_ref": descriptor},
+                headers=hub_headers,
+            )
 
             assert vol_error is False, vol_raw
             assert dd_error is False, dd_raw
@@ -314,19 +397,24 @@ class TestAnalyticsHubIntegration:
             tampered["schema_id"] = "tampered.schema"
             tampered["producer_service"] = "tampered-service"
 
-            with _hub_callback_token(_CONSUMER_CALLBACK_TOKEN):
-                original_error, original_raw = await _call_tool(
-                    stack.analytics_url,
-                    "simple_return",
-                    {"ticker": "MSFT", "bars_ref": descriptor},
-                    headers=AUTH_HEADERS,
-                )
-                tampered_error, tampered_raw = await _call_tool(
-                    stack.analytics_url,
-                    "simple_return",
-                    {"ticker": "MSFT", "bars_ref": tampered},
-                    headers=AUTH_HEADERS,
-                )
+            hub_headers = _fixture_hub_headers(
+                stack,
+                service=_ANALYTICS_SERVICE,
+                session_namespace=_SESSION_NAMESPACE,
+                allowed_operations=("get", "describe"),
+            )
+            original_error, original_raw = await _call_tool(
+                stack.analytics_url,
+                "simple_return",
+                {"ticker": "MSFT", "bars_ref": descriptor},
+                headers=hub_headers,
+            )
+            tampered_error, tampered_raw = await _call_tool(
+                stack.analytics_url,
+                "simple_return",
+                {"ticker": "MSFT", "bars_ref": tampered},
+                headers=hub_headers,
+            )
 
             assert original_error is False, original_raw
             assert tampered_error is False, tampered_raw
@@ -344,13 +432,17 @@ class TestAnalyticsHubIntegration:
                 "result_guid": "missing-result",
                 "hub_service": "gofr-agent",
             }
-            with _hub_callback_token(_CONSUMER_CALLBACK_TOKEN):
-                is_error, raw = await _call_tool(
-                    stack.analytics_url,
-                    "simple_return",
-                    {"ticker": "MSFT", "bars_ref": bad_descriptor},
-                    headers=AUTH_HEADERS,
-                )
+            is_error, raw = await _call_tool(
+                stack.analytics_url,
+                "simple_return",
+                {"ticker": "MSFT", "bars_ref": bad_descriptor},
+                headers=_fixture_hub_headers(
+                    stack,
+                    service=_ANALYTICS_SERVICE,
+                    session_namespace=_SESSION_NAMESPACE,
+                    allowed_operations=("get", "describe"),
+                ),
+            )
 
             assert is_error is True
             assert "gofr.result_ref" in raw or "validation" in raw.lower()

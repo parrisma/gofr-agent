@@ -234,6 +234,39 @@ class TestOpenUserSession:
         called_kwargs = mock_http.call_args.kwargs
         assert called_kwargs.get("headers", {}).get("Authorization") == "Bearer my-jwt"
 
+    async def test_open_user_session_forwards_extra_headers(self) -> None:
+        pool = SessionPool(_make_service(), pool_size=1)
+        session = _make_fake_session()
+
+        transport_cm = MagicMock()
+        transport_cm.__aenter__ = AsyncMock(return_value=(object(), object(), None))
+        transport_cm.__aexit__ = AsyncMock(return_value=False)
+
+        session_cm = MagicMock()
+        session_cm.__aenter__ = AsyncMock(return_value=session)
+        session_cm.__aexit__ = AsyncMock(return_value=False)
+
+        mock_shttp = patch(
+            "app.services.pool.streamablehttp_client", return_value=transport_cm
+        )
+        with (
+            mock_shttp as mock_http,
+            patch("app.services.pool.ClientSession", return_value=session_cm),
+        ):
+            async with pool.open_user_session(
+                "my-jwt",
+                extra_headers={
+                    "X-GOFR-HUB-URL": "http://gofr-agent:8090/mcp",
+                    "X-GOFR-HUB-CALLBACK-TOKEN": "signed-hub-token",
+                },
+            ) as s:
+                assert s is session
+
+        called_headers = mock_http.call_args.kwargs.get("headers", {})
+        assert called_headers["Authorization"] == "Bearer my-jwt"
+        assert called_headers["X-GOFR-HUB-URL"] == "http://gofr-agent:8090/mcp"
+        assert called_headers["X-GOFR-HUB-CALLBACK-TOKEN"] == "signed-hub-token"
+
     async def test_open_user_session_empty_token_raises(self) -> None:
         pool = SessionPool(_make_service(), pool_size=1)
         with pytest.raises(AuthTokenInvalidError):

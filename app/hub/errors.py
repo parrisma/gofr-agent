@@ -17,6 +17,7 @@ HUB_UNKNOWN_RESULT = "hub.unknown_result"
 HUB_EXPIRED_RESULT = "hub.expired_result"
 HUB_OVERSIZED_RESULT = "hub.oversized_result"
 HUB_CAPACITY_EXCEEDED = "hub.capacity_exceeded"
+HUB_STORE_UNAVAILABLE = "hub.store_unavailable"
 HUB_MALFORMED_REQUEST = "hub.malformed_request"
 HUB_SCHEMA_MISMATCH = "hub.schema_mismatch"
 
@@ -30,6 +31,7 @@ ALL_HUB_ERROR_CODES = (
     HUB_EXPIRED_RESULT,
     HUB_OVERSIZED_RESULT,
     HUB_CAPACITY_EXCEEDED,
+    HUB_STORE_UNAVAILABLE,
     HUB_MALFORMED_REQUEST,
     HUB_SCHEMA_MISMATCH,
 )

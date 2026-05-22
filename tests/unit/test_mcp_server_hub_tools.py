@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -14,6 +18,12 @@ from mcp import McpError
 from app.agent.agent import GofrAgent
 from app.auth.permissions import AGENT_ASK, AGENT_HUB_FETCH, AGENT_HUB_STORE
 from app.config import GofrAgentConfig
+from app.hub.auth import (
+    HUB_CALLBACK_TOKEN_AUDIENCE,
+    HUB_CALLBACK_TOKEN_ISSUER,
+    HUB_CALLBACK_TOKEN_TYPE,
+    mint_hub_callback_token,
+)
 from app.hub.clock import Clock
 from app.hub.store import ResultStore
 from app.mcp_server.mcp_server import create_mcp_server
@@ -22,7 +32,7 @@ from app.services.discovery import MCPToolInfo
 from app.services.registry import ServiceHubCapabilities, ServiceRegistry
 from app.sessions.store import SessionStore
 
-
+_SIGNED_HUB_SECRET = "unit-hub-secret"  # pragma: allowlist secret
 class _AuthMap:
     def __init__(self, token_map: dict[str, tuple[str, ...]]) -> None:
         self._token_map = token_map
@@ -59,6 +69,81 @@ def _make_config(**overrides) -> GofrAgentConfig:  # type: ignore[no-untyped-def
     defaults = {"hub_default_ttl_seconds": 60, "hub_max_payload_bytes": 2048}
     defaults.update(overrides)
     return GofrAgentConfig(**defaults)
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _sign_hub_claims(claims: dict[str, object]) -> str:
+    header = {"alg": "HS256", "typ": HUB_CALLBACK_TOKEN_TYPE}
+    encoded_header = _base64url_encode(
+        json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    encoded_payload = _base64url_encode(
+        json.dumps(claims, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    signing_input = f"{encoded_header}.{encoded_payload}"
+    signature = _base64url_encode(
+        hmac.new(
+            _SIGNED_HUB_SECRET.encode("utf-8"),
+            signing_input.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    )
+    return f"{signing_input}.{signature}"
+
+
+def _signed_callback_token(
+    *,
+    service: str,
+    session_namespace: str,
+    allowed_operations: tuple[str, ...],
+    allowed_result_types: tuple[str, ...] = ("ohlcv_bars",),
+    ttl_seconds: int = 300,
+    now: datetime | None = None,
+    token_id: str | None = None,
+) -> str:
+    return mint_hub_callback_token(
+        secret=_SIGNED_HUB_SECRET,
+        service=service,
+        session_namespace=session_namespace,
+        allowed_operations=allowed_operations,
+        allowed_result_types=allowed_result_types,
+        ttl_seconds=ttl_seconds,
+        now=now or datetime.now(UTC),
+        token_id=token_id,
+    )
+
+
+def _signed_callback_claims(
+    *,
+    service: str = "publisher",
+    session_namespace: str = "session-a",
+    ops: tuple[str, ...] = ("store",),
+    result_types: tuple[str, ...] = ("ohlcv_bars",),
+    ttl_seconds: int = 300,
+    now: datetime | None = None,
+    token_id: str = "signed-token",
+    **overrides: object,
+) -> str:
+    current_time = now or datetime.now(UTC)
+    issued_at = int(current_time.timestamp())
+    claims: dict[str, object] = {
+        "iss": HUB_CALLBACK_TOKEN_ISSUER,
+        "aud": HUB_CALLBACK_TOKEN_AUDIENCE,
+        "typ": HUB_CALLBACK_TOKEN_TYPE,
+        "service": service,
+        "session_namespace": session_namespace,
+        "ops": ops,
+        "result_types": result_types,
+        "iat": issued_at,
+        "nbf": issued_at,
+        "exp": issued_at + ttl_seconds,
+        "jti": token_id,
+    }
+    claims.update(overrides)
+    return _sign_hub_claims(claims)
 
 
 def _make_registry(
@@ -110,6 +195,261 @@ def _store_args(**overrides):  # type: ignore[no-untyped-def]
 
 
 class TestHubTools:
+    async def test_signed_callback_tokens_are_session_scoped(self) -> None:
+        config = _make_config(hub_callback_token_secret=_SIGNED_HUB_SECRET)
+        registry = _make_registry(
+            services=[
+                ServiceConfig(name="publisher", url="http://publisher/mcp"),
+                ServiceConfig(name="consumer", url="http://consumer/mcp"),
+            ],
+            capabilities={
+                "publisher": ServiceHubCapabilities(
+                    supports_results_hub=True,
+                    can_publish_results=True,
+                    result_types=("ohlcv_bars",),
+                ),
+                "consumer": ServiceHubCapabilities(
+                    supports_results_hub=True,
+                    can_consume_results=True,
+                    result_types=("ohlcv_bars",),
+                ),
+            },
+        )
+        store = ResultStore(config)
+        mcp = create_mcp_server(
+            config,
+            registry,
+            _make_agent(),
+            SessionStore(),
+            _AuthMap({}),
+            store,
+        )
+
+        publisher_token = _signed_callback_token(
+            service="publisher",
+            session_namespace="session-a",
+            allowed_operations=("store",),
+            token_id="publisher-session-a",
+        )
+        consumer_token_a = _signed_callback_token(
+            service="consumer",
+            session_namespace="session-a",
+            allowed_operations=("get", "describe"),
+            token_id="consumer-session-a",
+        )
+        consumer_token_b = _signed_callback_token(
+            service="consumer",
+            session_namespace="session-b",
+            allowed_operations=("get", "describe"),
+            token_id="consumer-session-b",
+        )
+
+        with _auth_context(publisher_token):
+            stored = await _call_tool(mcp, "_store_result", **_store_args())
+
+        with _auth_context(consumer_token_a):
+            fetched = await _call_tool(
+                mcp,
+                "_get_result",
+                protocol_version=1,
+                result_guid=stored["descriptor"]["result_guid"],
+                hub_service="gofr-agent",
+                expected_result_type="ohlcv_bars",
+                expected_schema_id="gofr.ohlcv_bars.v1",
+            )
+
+        with _auth_context(consumer_token_a):
+            described = await _call_tool(
+                mcp,
+                "_describe_result",
+                protocol_version=1,
+                result_guid=stored["descriptor"]["result_guid"],
+                hub_service="gofr-agent",
+                expected_result_type="ohlcv_bars",
+                expected_schema_id="gofr.ohlcv_bars.v1",
+            )
+
+        assert fetched["payload"] == [{"date": "2026-05-16", "close": 100.0}]
+        assert described["metadata"]["result_guid"] == stored["descriptor"]["result_guid"]
+
+        with _auth_context(consumer_token_b), pytest.raises(McpError) as exc_info:
+            await _call_tool(
+                mcp,
+                "_get_result",
+                protocol_version=1,
+                result_guid=stored["descriptor"]["result_guid"],
+                hub_service="gofr-agent",
+                expected_result_type="ohlcv_bars",
+                expected_schema_id="gofr.ohlcv_bars.v1",
+            )
+
+        assert exc_info.value.error.data == {"hub_code": "hub.unknown_result"}
+
+        with _auth_context(consumer_token_b), pytest.raises(McpError) as exc_info:
+            await _call_tool(
+                mcp,
+                "_describe_result",
+                protocol_version=1,
+                result_guid=stored["descriptor"]["result_guid"],
+                hub_service="gofr-agent",
+                expected_result_type="ohlcv_bars",
+                expected_schema_id="gofr.ohlcv_bars.v1",
+            )
+
+        assert exc_info.value.error.data == {"hub_code": "hub.unknown_result"}
+
+    async def test_store_result_rejects_signed_token_with_wrong_audience(self) -> None:
+        config = _make_config(hub_callback_token_secret=_SIGNED_HUB_SECRET)
+        registry = _make_registry(
+            services=[ServiceConfig(name="publisher", url="http://publisher/mcp")],
+            capabilities={
+                "publisher": ServiceHubCapabilities(
+                    supports_results_hub=True,
+                    can_publish_results=True,
+                    result_types=("ohlcv_bars",),
+                )
+            },
+        )
+        mcp = create_mcp_server(
+            config,
+            registry,
+            _make_agent(),
+            SessionStore(),
+            _AuthMap({}),
+            ResultStore(config),
+        )
+
+        token = _signed_callback_claims(aud="wrong-audience")
+
+        with _auth_context(token), pytest.raises(McpError) as exc_info:
+            await _call_tool(mcp, "_store_result", **_store_args())
+
+        assert exc_info.value.error.data == {"hub_code": "hub.unauthorised"}
+
+    async def test_store_result_rejects_signed_token_for_unregistered_service(self) -> None:
+        config = _make_config(hub_callback_token_secret=_SIGNED_HUB_SECRET)
+        registry = _make_registry(services=[], capabilities={})
+        mcp = create_mcp_server(
+            config,
+            registry,
+            _make_agent(),
+            SessionStore(),
+            _AuthMap({}),
+            ResultStore(config),
+        )
+
+        token = _signed_callback_token(
+            service="other-service",
+            session_namespace="session-a",
+            allowed_operations=("store",),
+            token_id="other-service",
+        )
+
+        with _auth_context(token), pytest.raises(McpError) as exc_info:
+            await _call_tool(
+                mcp,
+                "_store_result",
+                **_store_args(producer_service="other-service"),
+            )
+
+        assert exc_info.value.error.data == {"hub_code": "hub.unregistered_service"}
+
+    async def test_store_result_rejects_signed_token_with_wrong_operation(self) -> None:
+        config = _make_config(hub_callback_token_secret=_SIGNED_HUB_SECRET)
+        registry = _make_registry(
+            services=[ServiceConfig(name="publisher", url="http://publisher/mcp")],
+            capabilities={
+                "publisher": ServiceHubCapabilities(
+                    supports_results_hub=True,
+                    can_publish_results=True,
+                    result_types=("ohlcv_bars",),
+                )
+            },
+        )
+        mcp = create_mcp_server(
+            config,
+            registry,
+            _make_agent(),
+            SessionStore(),
+            _AuthMap({}),
+            ResultStore(config),
+        )
+
+        token = _signed_callback_token(
+            service="publisher",
+            session_namespace="session-a",
+            allowed_operations=("get",),
+            token_id="wrong-operation",
+        )
+
+        with _auth_context(token), pytest.raises(McpError) as exc_info:
+            await _call_tool(mcp, "_store_result", **_store_args())
+
+        assert exc_info.value.error.data == {"hub_code": "hub.unauthorised"}
+
+    async def test_store_result_rejects_expired_signed_token(self) -> None:
+        config = _make_config(hub_callback_token_secret=_SIGNED_HUB_SECRET)
+        registry = _make_registry(
+            services=[ServiceConfig(name="publisher", url="http://publisher/mcp")],
+            capabilities={
+                "publisher": ServiceHubCapabilities(
+                    supports_results_hub=True,
+                    can_publish_results=True,
+                    result_types=("ohlcv_bars",),
+                )
+            },
+        )
+        mcp = create_mcp_server(
+            config,
+            registry,
+            _make_agent(),
+            SessionStore(),
+            _AuthMap({}),
+            ResultStore(config),
+        )
+
+        token = _signed_callback_token(
+            service="publisher",
+            session_namespace="session-a",
+            allowed_operations=("store",),
+            ttl_seconds=30,
+            now=datetime(2000, 1, 1, tzinfo=UTC),
+            token_id="expired-token",
+        )
+
+        with _auth_context(token), pytest.raises(McpError) as exc_info:
+            await _call_tool(mcp, "_store_result", **_store_args())
+
+        assert exc_info.value.error.data == {"hub_code": "hub.unauthorised"}
+
+    async def test_store_result_rejects_signed_token_without_session_scope(self) -> None:
+        config = _make_config(hub_callback_token_secret=_SIGNED_HUB_SECRET)
+        registry = _make_registry(
+            services=[ServiceConfig(name="publisher", url="http://publisher/mcp")],
+            capabilities={
+                "publisher": ServiceHubCapabilities(
+                    supports_results_hub=True,
+                    can_publish_results=True,
+                    result_types=("ohlcv_bars",),
+                )
+            },
+        )
+        mcp = create_mcp_server(
+            config,
+            registry,
+            _make_agent(),
+            SessionStore(),
+            _AuthMap({}),
+            ResultStore(config),
+        )
+
+        token = _signed_callback_claims(session_namespace="")
+
+        with _auth_context(token), pytest.raises(McpError) as exc_info:
+            await _call_tool(mcp, "_store_result", **_store_args())
+
+        assert exc_info.value.error.data == {"hub_code": "hub.unauthorised"}
+
     async def test_store_result_accepts_valid_callback_token(self) -> None:
         config = _make_config()
         registry = _make_registry(

@@ -52,6 +52,9 @@ RUN chmod +x /entrypoint.sh
 
 WORKDIR /home/gofr/devroot/gofr-agent
 
+COPY . /home/gofr/devroot/gofr-agent/
+RUN chown -R gofr:gofr /home/gofr/devroot/gofr-agent /home/gofr/devroot/gofr-common
+
 # SSH config for git operations
 RUN mkdir -p /home/gofr/.ssh && chmod 700 /home/gofr/.ssh
 

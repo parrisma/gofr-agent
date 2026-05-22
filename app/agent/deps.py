@@ -35,6 +35,8 @@ class AgentDeps:
 
     token: str
     request_id: str = "unknown-request"
+    session_id: str = "unknown-session"
+    run_id: str | None = None
     intent_constraints: IntentConstraints = field(default_factory=IntentConstraints)
     artifacts: list[ToolArtifact] = field(default_factory=list)
     provenance: list[ProvenanceRecord] = field(default_factory=list)
