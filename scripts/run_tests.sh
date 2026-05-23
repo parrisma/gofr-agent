@@ -1,4 +1,5 @@
 #!/bin/bash
+# Description: Run the repository quality gate plus selected unit and integration test workflows.
 # =============================================================================
 # GOFR-Agent Test Runner
 # =============================================================================

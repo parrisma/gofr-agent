@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Description: Launch a manual interactive chat session against the local fixture-backed agent stack.
 """Interactive fixture chat launcher for manual gofr-agent testing.
 
 Starts the Compose-managed fixture services, boots a local gofr-agent MCP
@@ -59,7 +60,7 @@ from tests.fixtures.mcp_services import analytics, instruments
 from tests.fixtures.mcp_services._server import _UvicornThread, make_service_server
 
 COMPOSE_FILE = PROJECT_ROOT / "docker" / "compose.dev.yml"
-DEV_NETWORK = "gofr-dev-net"
+DEV_NETWORK = "gofr-net"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
 DEV_TOKEN = "dev-admin-token"

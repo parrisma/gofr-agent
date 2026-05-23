@@ -1,4 +1,5 @@
 #!/bin/bash
+# Description: Start the fixture MCP services and write a manifest for manual gofr-agent server runs.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -6,7 +7,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MANIFEST_PATH="${PROJECT_ROOT}/tmp/fixture-services.yml"
 COMPOSE_FILE="${PROJECT_ROOT}/docker/compose.dev.yml"
 CANONICAL_MANIFEST_PATH="${PROJECT_ROOT}/docker/services.compose.dev.yml"
-DEV_NETWORK="${GOFR_DEV_NETWORK:-gofr-dev-net}"
+DEV_NETWORK="${GOFR_DEV_NETWORK:-gofr-net}"
 MANUAL_AGENT_ALIAS="${GOFR_AGENT_MANUAL_ALIAS:-gofr-agent-manual}"
 CURRENT_CONTAINER_ID="$(hostname)"
 

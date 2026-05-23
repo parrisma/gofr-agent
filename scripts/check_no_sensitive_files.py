@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Description: Reject paths that look like local secrets or other sensitive artefacts.
 """Block obviously sensitive local artefacts from being committed."""
 
 from __future__ import annotations

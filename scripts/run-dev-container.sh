@@ -1,4 +1,5 @@
 #!/bin/bash
+# Description: Start the gofr-agent development container with the expected local networks and port mappings.
 # Run GOFR-AGENT development container
 # Uses gofr-agent-dev:latest image (built from gofr-base:latest)
 # Runs as the host UID/GID so bind-mounted files have correct ownership.

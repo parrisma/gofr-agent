@@ -1,4 +1,5 @@
 #!/bin/bash
+# Description: Start the real gofr-agent MCP server for local manual and UI testing workflows.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -107,6 +107,33 @@ The server listens on **port 8090** by default.
 For local UI testing against the real `app.main_mcp` server plus Valkey and the
 fixture MCP services, use the unified Compose stack.
 
+The simplest runtime entrypoint is `./scripts/compose-dev-stack.sh`, which wraps
+`docker/compose.dev.yml` for `start`, `status`, and `stop`. For `start`, the
+only required input is the OpenRouter API key. The runtime service already
+starts `gofr-agent` with the checked-in manifest
+`/home/gofr/devroot/gofr-agent/docker/services.compose.dev.yml`, so you do not
+need to pass a separate `services.yml` path.
+
+```bash
+# 1. Start the runtime stack with a live model
+./scripts/compose-dev-stack.sh start sk-or-...
+
+# 2. Inspect status
+./scripts/compose-dev-stack.sh status
+
+# 3. Stop the stack when finished
+./scripts/compose-dev-stack.sh stop
+```
+
+The wrapper defaults to:
+
+- `GOFR_AGENT_LLM_MODEL=openai:deepseek/deepseek-v4-pro`
+- `GOFR_AGENT_AGENT_TIMEOUT_SECONDS=600`
+- `GOFR_AGENT_MAX_STEPS=100`
+- `GOFR_AGENT_MAX_STEPS_HARD_CAP=200`
+
+Override those with environment variables before `start` when needed.
+
 ```bash
 # 1. Dedicated runtime container: agent + Valkey + fixtures
 docker compose -f docker/compose.dev.yml --profile runtime up -d --build
@@ -149,13 +176,13 @@ To run the ask CLI from a disposable container on the same network:
 ```
 
 That wrapper builds `docker/Dockerfile.cli` on first use, joins
-`gofr-dev-net`, and points the CLI at `http://gofr-agent-dev:8090/mcp` with
+`gofr-net`, and points the CLI at `http://gofr-agent-dev:8090/mcp` with
 token `dev-admin-token` by default. Override `GOFR_AGENT_CLI_URL`,
 `GOFR_AGENT_CLI_TOKEN`, or `GOFR_AGENT_CLI_NETWORK` when needed.
 
 For manual current-dev-container workflows, `./scripts/start-test-mcp-services.sh`
 still starts Valkey + the fixture services and writes `tmp/fixture-services.yml`.
-That helper also connects the current dev container to `gofr-dev-net` as
+That helper also connects the current dev container to `gofr-net` as
 `gofr-agent-manual`, so manual `./scripts/start-real-server.sh` runs should use
 `--hub-url http://gofr-agent-manual:8090/mcp`.
 
@@ -412,7 +439,7 @@ clarification summaries from the JSON payload when available.
 The recommended CLI entrypoint for the compose dev stack is
 `./scripts/ask-docker.sh`. That script is a thin wrapper around
 `python -m app.cli.ask`: it builds `docker/Dockerfile.cli` on first use,
-starts a disposable container on `gofr-dev-net`, sets `GOFR_AGENT_URL` and
+starts a disposable container on `gofr-net`, sets `GOFR_AGENT_URL` and
 `GOFR_AGENT_TOKEN`, then forwards every CLI argument to `app.cli.ask`.
 
 ```bash

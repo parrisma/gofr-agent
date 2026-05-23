@@ -1,10 +1,11 @@
 #!/bin/bash
+# Description: Run the gofr-agent ask CLI inside a disposable Docker container on the dev network.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 IMAGE_NAME="${GOFR_AGENT_CLI_IMAGE:-gofr-agent-cli:latest}"
-NETWORK_NAME="${GOFR_AGENT_CLI_NETWORK:-gofr-dev-net}"
+NETWORK_NAME="${GOFR_AGENT_CLI_NETWORK:-gofr-net}"
 AGENT_URL="${GOFR_AGENT_CLI_URL:-${GOFR_AGENT_URL:-http://gofr-agent-dev:8090/mcp}}"
 AGENT_TOKEN="${GOFR_AGENT_CLI_TOKEN:-${GOFR_AGENT_TOKEN:-dev-admin-token}}"
 FORCE_BUILD="${GOFR_AGENT_CLI_BUILD:-0}"

@@ -14,11 +14,12 @@ x-agent-common: &agent-common
     GOFR_AGENT_LLM_MODEL: ${GOFR_AGENT_LLM_MODEL:-test}
     OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     GOFR_AGENT_LOG_LEVEL: ${GOFR_AGENT_LOG_LEVEL:-INFO}
+    GOFR_AGENT_PROVENANCE_IN_RESPONSE_ENABLED: ${GOFR_AGENT_PROVENANCE_IN_RESPONSE_ENABLED:-true}
     GOFR_AGENT_MCP_ALLOWED_HOSTS: ${GOFR_AGENT_MCP_ALLOWED_HOSTS:-gofr-agent-dev,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,gofr-agent-runtime,gofr-agent-runtime:8090,gofr-agent-workspace,gofr-agent-workspace:8090,gofr-agent-manual,gofr-agent-manual:8090,127.0.0.1:*,localhost:*,[::1]:*}
     GOFR_AGENT_MCP_ALLOWED_ORIGINS: ${GOFR_AGENT_MCP_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000}
     GOFR_AGENT_CORS_ORIGINS: ${GOFR_AGENT_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000}
   networks:
-    - gofr-dev-net
+    - gofr-net
 
 x-fixture-common: &fixture-common
   build:
@@ -33,7 +34,7 @@ x-fixture-common: &fixture-common
     - ALL
   restart: unless-stopped
   networks:
-    - gofr-dev-net
+    - gofr-net
 
 services:
   gofr-agent-runtime:
@@ -65,7 +66,7 @@ services:
     ports:
       - "8090:8090"
     networks:
-      gofr-dev-net:
+      gofr-net:
         aliases:
           - gofr-agent-dev
     healthcheck:
@@ -95,7 +96,7 @@ services:
     ports:
       - "8090:8090"
     networks:
-      gofr-dev-net:
+      gofr-net:
         aliases:
           - gofr-agent-dev
 
@@ -121,7 +122,7 @@ services:
       retries: 5
       start_period: 5s
     networks:
-      - gofr-dev-net
+      - gofr-net
 
   mcp-instruments:
     <<: *fixture-common
@@ -186,9 +187,9 @@ services:
       start_period: 15s
 
 networks:
-  gofr-dev-net:
-    name: gofr-dev-net
-    driver: bridge
+  gofr-net:
+    external: true
+    name: gofr-net
 
 volumes:
   gofr-agent-data-dev:
