@@ -14,7 +14,14 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-DEFAULT_MCP_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+DEFAULT_MCP_ALLOWED_HOSTS = [
+    "127.0.0.1",
+    "127.0.0.1:*",
+    "localhost",
+    "localhost:*",
+    "[::1]",
+    "[::1]:*",
+]
 DEFAULT_HUB_STORE_BACKEND = "memory"
 HubStoreBackend = Literal["memory", "external_cache"]
 _HUB_STORE_BACKENDS: tuple[HubStoreBackend, ...] = ("memory", "external_cache")

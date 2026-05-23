@@ -37,8 +37,10 @@ HUB_URL="${GOFR_AGENT_HUB_URL:-}"
 HUB_STORE_BACKEND="${GOFR_AGENT_HUB_STORE_BACKEND:-${DEFAULT_HUB_STORE_BACKEND}}"
 HUB_CACHE_URL="${GOFR_AGENT_HUB_CACHE_URL:-}"
 
-DEFAULT_ALLOWED_HOSTS="gofr-agent-dev,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,gofr-agent-runtime,gofr-agent-runtime:8090,gofr-agent-workspace,gofr-agent-workspace:8090,gofr-agent-manual,gofr-agent-manual:8090,127.0.0.1:*,localhost:*,[::1]:*"
+DEFAULT_ALLOWED_HOSTS="gofr-agent-dev,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,gofr-agent-runtime,gofr-agent-runtime:8090,gofr-agent-workspace,gofr-agent-workspace:8090,gofr-agent-manual,gofr-agent-manual:8090,127.0.0.1,127.0.0.1:*,localhost,localhost:*,[::1],[::1]:*"
 DEFAULT_ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000"
+LEGACY_ALLOWED_HOSTS_RUN_DEV="gofr-agent-dev,gofr-agent-dev:8040,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,127.0.0.1:*,localhost:*,[::1]:*"
+LEGACY_ALLOWED_HOSTS_COMPOSE="gofr-agent-dev,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,gofr-agent-runtime,gofr-agent-runtime:8090,gofr-agent-workspace,gofr-agent-workspace:8090,gofr-agent-manual,gofr-agent-manual:8090,127.0.0.1:*,localhost:*,[::1]:*"
 
 normalize_bool() {
     local value
@@ -59,6 +61,20 @@ normalize_bool() {
 
 build_hub_url() {
     printf 'http://%s:%s/mcp' "$1" "$2"
+}
+
+normalize_allowed_hosts() {
+    local current
+
+    current="${GOFR_AGENT_MCP_ALLOWED_HOSTS:-}"
+    case "${current}" in
+        ""|"${LEGACY_ALLOWED_HOSTS_RUN_DEV}"|"${LEGACY_ALLOWED_HOSTS_COMPOSE}")
+            printf '%s' "${DEFAULT_ALLOWED_HOSTS}"
+            ;;
+        *)
+            printf '%s' "${current}"
+            ;;
+    esac
 }
 
 usage() {
@@ -314,7 +330,7 @@ if [[ -n "${HUB_CACHE_URL}" ]]; then
 else
     unset GOFR_AGENT_HUB_CACHE_URL
 fi
-export GOFR_AGENT_MCP_ALLOWED_HOSTS="${GOFR_AGENT_MCP_ALLOWED_HOSTS:-${DEFAULT_ALLOWED_HOSTS}}"
+export GOFR_AGENT_MCP_ALLOWED_HOSTS="$(normalize_allowed_hosts)"
 export GOFR_AGENT_MCP_ALLOWED_ORIGINS="${GOFR_AGENT_MCP_ALLOWED_ORIGINS:-${DEFAULT_ALLOWED_ORIGINS}}"
 export GOFR_AGENT_CORS_ORIGINS="${GOFR_AGENT_CORS_ORIGINS:-${DEFAULT_ALLOWED_ORIGINS}}"
 

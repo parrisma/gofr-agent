@@ -15,7 +15,7 @@ x-agent-common: &agent-common
     OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     GOFR_AGENT_LOG_LEVEL: ${GOFR_AGENT_LOG_LEVEL:-INFO}
     GOFR_AGENT_PROVENANCE_IN_RESPONSE_ENABLED: ${GOFR_AGENT_PROVENANCE_IN_RESPONSE_ENABLED:-true}
-    GOFR_AGENT_MCP_ALLOWED_HOSTS: ${GOFR_AGENT_MCP_ALLOWED_HOSTS:-gofr-agent-dev,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,gofr-agent-runtime,gofr-agent-runtime:8090,gofr-agent-workspace,gofr-agent-workspace:8090,gofr-agent-manual,gofr-agent-manual:8090,127.0.0.1:*,localhost:*,[::1]:*}
+    GOFR_AGENT_MCP_ALLOWED_HOSTS: ${GOFR_AGENT_MCP_ALLOWED_HOSTS:-gofr-agent-dev,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,gofr-agent-runtime,gofr-agent-runtime:8090,gofr-agent-workspace,gofr-agent-workspace:8090,gofr-agent-manual,gofr-agent-manual:8090,127.0.0.1,127.0.0.1:*,localhost,localhost:*,[::1],[::1]:*}
     GOFR_AGENT_MCP_ALLOWED_ORIGINS: ${GOFR_AGENT_MCP_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000}
     GOFR_AGENT_CORS_ORIGINS: ${GOFR_AGENT_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000}
   networks:

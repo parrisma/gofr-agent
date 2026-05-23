@@ -12,6 +12,10 @@ DEFAULT_TIMEOUT_SECONDS="600"
 DEFAULT_MAX_STEPS="100"
 DEFAULT_MAX_STEPS_HARD_CAP="200"
 START_WAIT_SECONDS="${GOFR_AGENT_START_WAIT_SECONDS:-120}"
+DEFAULT_ALLOWED_HOSTS="gofr-agent-dev,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,gofr-agent-runtime,gofr-agent-runtime:8090,gofr-agent-workspace,gofr-agent-workspace:8090,gofr-agent-manual,gofr-agent-manual:8090,127.0.0.1,127.0.0.1:*,localhost,localhost:*,[::1],[::1]:*"
+DEFAULT_ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000"
+LEGACY_ALLOWED_HOSTS_RUN_DEV="gofr-agent-dev,gofr-agent-dev:8040,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,127.0.0.1:*,localhost:*,[::1]:*"
+LEGACY_ALLOWED_HOSTS_COMPOSE="gofr-agent-dev,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,gofr-agent-runtime,gofr-agent-runtime:8090,gofr-agent-workspace,gofr-agent-workspace:8090,gofr-agent-manual,gofr-agent-manual:8090,127.0.0.1:*,localhost:*,[::1]:*"
 
 usage() {
     cat <<EOF
@@ -80,6 +84,20 @@ wait_for_runtime() {
     return 1
 }
 
+normalize_allowed_hosts() {
+    local current
+
+    current="${GOFR_AGENT_MCP_ALLOWED_HOSTS:-}"
+    case "${current}" in
+        ""|"${LEGACY_ALLOWED_HOSTS_RUN_DEV}"|"${LEGACY_ALLOWED_HOSTS_COMPOSE}")
+            printf '%s' "${DEFAULT_ALLOWED_HOSTS}"
+            ;;
+        *)
+            printf '%s' "${current}"
+            ;;
+    esac
+}
+
 start_stack() {
     local api_key
 
@@ -99,6 +117,9 @@ start_stack() {
     export GOFR_AGENT_AGENT_TIMEOUT_SECONDS="${GOFR_AGENT_AGENT_TIMEOUT_SECONDS:-${DEFAULT_TIMEOUT_SECONDS}}"
     export GOFR_AGENT_MAX_STEPS="${GOFR_AGENT_MAX_STEPS:-${DEFAULT_MAX_STEPS}}"
     export GOFR_AGENT_MAX_STEPS_HARD_CAP="${GOFR_AGENT_MAX_STEPS_HARD_CAP:-${DEFAULT_MAX_STEPS_HARD_CAP}}"
+    export GOFR_AGENT_MCP_ALLOWED_HOSTS="$(normalize_allowed_hosts)"
+    export GOFR_AGENT_MCP_ALLOWED_ORIGINS="${GOFR_AGENT_MCP_ALLOWED_ORIGINS:-${DEFAULT_ALLOWED_ORIGINS}}"
+    export GOFR_AGENT_CORS_ORIGINS="${GOFR_AGENT_CORS_ORIGINS:-${DEFAULT_ALLOWED_ORIGINS}}"
 
     ensure_network
     docker compose -f "${COMPOSE_FILE}" --profile runtime up -d --build --force-recreate

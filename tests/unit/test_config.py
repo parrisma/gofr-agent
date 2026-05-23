@@ -13,7 +13,14 @@ class TestGofrAgentConfig:
         assert cfg.mcpo_port == 8091
         assert cfg.host == "0.0.0.0"
         assert cfg.llm_model == "openai:gpt-4o-mini"
-        assert cfg.mcp_allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        assert cfg.mcp_allowed_hosts == [
+            "127.0.0.1",
+            "127.0.0.1:*",
+            "localhost",
+            "localhost:*",
+            "[::1]",
+            "[::1]:*",
+        ]
         assert cfg.mcp_allowed_origins == []
         assert cfg.mcp_dns_rebinding_protection_enabled is True
         assert cfg.cors_allowed_origins == []
@@ -73,6 +80,7 @@ class TestGofrAgentConfig:
                 [
                     "gofr-agent-dev",
                     "gofr-agent-dev:8090",
+                    "localhost",
                     "127.0.0.1:*",
                     "localhost:*",
                     "[::1]:*",
@@ -135,6 +143,7 @@ class TestGofrAgentConfig:
         assert cfg.mcp_allowed_hosts == [
             "gofr-agent-dev",
             "gofr-agent-dev:8090",
+            "localhost",
             "127.0.0.1:*",
             "localhost:*",
             "[::1]:*",

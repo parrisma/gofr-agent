@@ -87,7 +87,7 @@ For the local console topology, the backend should explicitly allow the console
 browser origins and the Host value the agent actually receives through the proxy:
 
 ```text
-GOFR_AGENT_MCP_ALLOWED_HOSTS=gofr-agent-dev,gofr-agent-dev:8090,gofr-agent:8090,127.0.0.1:*,localhost:*,[::1]:*
+GOFR_AGENT_MCP_ALLOWED_HOSTS=gofr-agent-dev,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,gofr-agent-runtime,gofr-agent-runtime:8090,127.0.0.1,127.0.0.1:*,localhost,localhost:*,[::1],[::1]:*
 GOFR_AGENT_MCP_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000
 GOFR_AGENT_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000
 ```

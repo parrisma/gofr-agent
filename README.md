@@ -244,7 +244,7 @@ full table below.
 | `GOFR_AGENT_MCP_PORT` | `8090` | MCP server port |
 | `GOFR_AGENT_MCPO_PORT` | `8091` | OpenAI-compatible proxy port |
 | `GOFR_AGENT_SERVICES_FILE` | unset | Optional services manifest path |
-| `GOFR_AGENT_MCP_ALLOWED_HOSTS` | `127.0.0.1:*,localhost:*,[::1]:*` | Inbound `/mcp` Host header allow-list for FastMCP DNS rebinding protection |
+| `GOFR_AGENT_MCP_ALLOWED_HOSTS` | `127.0.0.1,127.0.0.1:*,localhost,localhost:*,[::1],[::1]:*` | Inbound `/mcp` Host header allow-list for FastMCP DNS rebinding protection |
 | `GOFR_AGENT_MCP_ALLOWED_ORIGINS` | empty | Inbound `/mcp` Origin allow-list; absent Origin is allowed for same-origin/non-browser calls |
 | `GOFR_AGENT_MCP_DNS_REBINDING_PROTECTION_ENABLED` | `true` | Enable FastMCP Host and Origin validation |
 | `GOFR_AGENT_CORS_ORIGINS` | empty | Optional browser CORS origin allow-list for direct browser/proxy preflight paths |

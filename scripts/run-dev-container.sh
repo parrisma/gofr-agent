@@ -28,7 +28,7 @@ WEB_PORT="${GOFRAGT_WEB_PORT:-9042}"
 # Primary network for dev; also connects to gofr-test-net for tests
 DOCKER_NETWORK="${GOFRAGT_DOCKER_NETWORK:-gofr-net}"
 TEST_NETWORK="${GOFR_TEST_NETWORK:-gofr-test-net}"
-DEFAULT_MCP_ALLOWED_HOSTS="gofr-agent-dev,gofr-agent-dev:8040,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,127.0.0.1:*,localhost:*,[::1]:*"
+DEFAULT_MCP_ALLOWED_HOSTS="gofr-agent-dev,gofr-agent-dev:8040,gofr-agent-dev:8090,gofr-agent,gofr-agent:8090,gofr-agent-runtime,gofr-agent-runtime:8090,gofr-agent-workspace,gofr-agent-workspace:8090,gofr-agent-manual,gofr-agent-manual:8090,127.0.0.1,127.0.0.1:*,localhost,localhost:*,[::1],[::1]:*"
 DEFAULT_CONSOLE_ORIGINS="http://localhost:3000,http://127.0.0.1:3000,http://gofr-console-dev:3000"
 MCP_ALLOWED_HOSTS="${GOFR_AGENT_MCP_ALLOWED_HOSTS:-$DEFAULT_MCP_ALLOWED_HOSTS}"
 MCP_ALLOWED_ORIGINS="${GOFR_AGENT_MCP_ALLOWED_ORIGINS:-$DEFAULT_CONSOLE_ORIGINS}"

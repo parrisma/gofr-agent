@@ -141,8 +141,11 @@ In the current Compose runtime, defaults are:
   - `gofr-agent-workspace:8090`
   - `gofr-agent-manual`
   - `gofr-agent-manual:8090`
+  - `127.0.0.1`
   - `127.0.0.1:*`
+  - `localhost`
   - `localhost:*`
+  - `[::1]`
   - `[::1]:*`
 
 - `GOFR_AGENT_MCP_ALLOWED_ORIGINS`
