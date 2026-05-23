@@ -113,10 +113,16 @@ settings panel, or the host application's auth layer:
 | `sessionId` | Chat thread identifier | `crypto.randomUUID()` |
 | `maxSteps` | Per-question tool-call cap | 20 in UI, never above server hard cap |
 | `outputFormat` | Optional final answer shape | unset, `text`, or `json` |
+| `interactive` | Enable Phase 1A wait/resume flow when the deployment supports it | false |
 | `toolsOnly` | Require factual answers from tools | false by default |
+| `noCommentary` | Ask for a terse final answer without extra commentary | false by default |
+| `instructions` | Authenticated requester instructions for this run | unset |
+| `assertedFacts` | Non-authoritative caller facts to pass with the request | unset |
+| `pastedContent` | Third-party content to treat as data only | unset |
 | `allowedServices` | Optional service allow-list | unset |
 | `forbiddenServices` | Services the user disallows | unset |
 | `forbiddenTools` | Tools the user disallows | unset |
+| `modelOverride` | Optional model selection from the server allow-list | unset unless the operator exposes allowed values |
 
 Production token guidance:
 
@@ -124,6 +130,19 @@ Production token guidance:
 - Prefer a same-origin backend that injects or exchanges tokens.
 - If the browser must hold a token, make it short-lived and scoped to the user.
 - The UI should treat auth failures as recoverable configuration errors.
+
+The React surface should expose the full public `ask` feature set, not just the
+minimum chat path. In practice that means the UI needs a basic mode for asking
+questions immediately and an advanced mode that can set requester
+`instructions`, asserted facts, pasted content, service/tool constraints,
+interactive waiting, `no_commentary`, and model override where allowed.
+
+CLI presentation flags such as `--quiet` and `--verbose` do not change the MCP
+request payload, but the UI should still offer equivalent presentation modes:
+
+- final answer only
+- compact trace plus answer
+- verbose trace with tool arguments, summaries, provenance, and raw debug JSON
 
 ## 4. MCP client contract
 
@@ -184,6 +203,36 @@ export function agentHttpBaseUrl(mcpUrl: string): string {
   return url.toString().replace(/\/$/, "");
 }
 ```
+
+### Local dev parity with `ask-docker.sh`
+
+For local manual testing, `scripts/ask-docker.sh` is the reference CLI wrapper.
+It runs `app.cli.ask` in a disposable Docker container and forwards every CLI
+argument through to the MCP `ask` flow. React builders should treat it as a
+convenient parity harness when checking whether the UI exposes the same request
+controls as the backend.
+
+Relevant wrapper env overrides:
+
+- `GOFR_AGENT_CLI_URL`
+- `GOFR_AGENT_CLI_TOKEN`
+- `GOFR_AGENT_CLI_NETWORK`
+- `GOFR_AGENT_CLI_IMAGE`
+- `GOFR_AGENT_CLI_BUILD`
+
+Relevant forwarded CLI features the React UI should match or intentionally map:
+
+- `--session` and `--reset` map to `session_id` reuse and `reset_session`
+- `--max-steps` maps to `max_steps`
+- `--format` maps to `output_format` and raw JSON/debug presentation
+- `--interactive` maps to `interactive`
+- `--instructions`, `--asserted-fact`, and `--pasted-content` map to the
+  structured caller-content controls
+- `--allowed-service`, `--forbidden-service`, and `--forbidden-tool` map to
+  advanced constraint controls
+- `--tools-only` and `--no-commentary` map to answer-behaviour controls
+- `--quiet` and `--verbose` map to trace-density / presentation controls in the
+  UI rather than new MCP request fields
 
 ## 5. MCP tools visible to the React UI
 
@@ -799,8 +848,17 @@ Expected controls:
   settings.
 - Numeric input or stepper for `maxSteps`.
 - Segmented control for output format: default, text, JSON.
-- Toggles for `toolsOnly` and `noCommentary`.
-- Multi-select or checkboxes for allowed/forbidden services when exposed.
+- Toggles for `toolsOnly`, `noCommentary`, and `interactive` when enabled by the
+  deployment.
+- Text area or modal editor for requester `instructions`.
+- Repeatable inputs or chip editors for `assertedFacts` and `pastedContent`.
+- Multi-select or checkboxes for allowed services, forbidden services, and
+  forbidden tools when exposed.
+- Optional model override selector only when the backend exposes an allowed list
+  for the current user/deployment.
+- Trace-density or debug controls that can hide reasoning, show the compact
+  default trace, or show verbose details and raw JSON similar to the CLI's
+  `--quiet`, default, `--verbose`, and `--format json` modes.
 - Collapsible sections for service tools, reasoning trace, provenance, and raw
   debug JSON.
 
@@ -1074,7 +1132,9 @@ Implement in this order:
   loading.
 8. Add live reasoning trace rendering from notifications.
 9. Add reset session.
-10. Add advanced constraints only after the basic chat path works.
+10. Add advanced ask controls only after the basic chat path works:
+  requester instructions, asserted facts, pasted content, service/tool
+  constraints, no-commentary, interactive mode, and model override.
 11. Add provenance, verification gap, clarification, and Phase 1A pending
     prompt rendering.
 12. Add `respond_to_user_input`, `get_pending_user_input`, and
@@ -1117,6 +1177,12 @@ Component tests:
 - `list_services` renders degraded services without crashing.
 - Sending a question appends user and assistant turns.
 - A `tool_call` notification appears in the trace before final answer.
+- Advanced controls serialize into the expected `ask` payload fields:
+  `instructions`, `asserted_facts`, `pasted_content`, `allowed_services`,
+  `forbidden_services`, `forbidden_tools`, `tools_only`, `no_commentary`,
+  `interactive`, and `model_override` when present.
+- Trace presentation can switch between answer-only, compact trace, verbose
+  trace, and raw JSON/debug views without changing the underlying MCP request.
 - Reset calls `reset_session` and clears local turns.
 
 Integration tests with a mocked MCP client:

@@ -423,7 +423,7 @@ bash -n scripts/start-real-server.sh
 Manual verification for this step:
 
 1. Start the Valkey-backed dev stack.
-2. Confirm the fixture MCP services are healthy on `gofr-dev-net`.
+2. Confirm the fixture MCP services are healthy on `gofr-net`.
 3. Start the real server with `GOFR_AGENT_HUB_STORE_BACKEND=external_cache` and
    a `redis://gofr-agent-valkey:6379/0` cache URL.
 4. Confirm startup logs show healthy external-cache state.

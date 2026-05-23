@@ -46,7 +46,7 @@ Out of scope:
 ## Pre-Conditions
 
 - `OPENROUTER_API_KEY` exported in the test shell.
-- Compose dev stack up via `docker compose -f docker/compose.dev.yml --profile runtime up -d --build` on `gofr-dev-net`.
+- Compose dev stack up via `docker compose -f docker/compose.dev.yml --profile runtime up -d --build` on `gofr-net`.
 - Tests run via `./scripts/run_tests.sh`. Live-LLM scenarios are marked with
   the `openrouter` pytest marker and are skipped automatically when the key
   is not set.
